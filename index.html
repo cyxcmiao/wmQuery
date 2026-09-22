@@ -73,6 +73,8 @@ body.scene-dragging .scene-item { cursor: grabbing; }
   padding: 40px 24px;
 }
 .panel { width: 100%; max-width: 640px; }
+/* 场景页表格列多，切换到场景时由 JS 给 main 加 wide 类放宽容器 */
+main.wide { max-width: 900px; }
 h1 {
   font-size: 26px; color: #1c2733; letter-spacing: 1px;
   border-left: 4px solid #2b87c0; padding-left: 14px;
@@ -144,19 +146,26 @@ td.rank-no { color: #8a97a5; }
 .scene-card {
   background: #ffffff; border: 1px solid #e0e7ee; border-radius: 12px;
   padding: 12px 14px 14px; box-shadow: 0 1px 3px rgba(16, 36, 56, .05);
+  overflow-x: auto;  /* 窗口过窄时表格横向滚动，不挤压单元格 */
 }
 .scene-table { width: 100%; border-collapse: collapse; }
 .scene-table th {
   text-align: left; font-size: 13px; font-weight: 500; color: #6b7a89;
   padding: 8px 8px; border-bottom: 1px solid #d3dde5;
+  white-space: nowrap;
 }
-.scene-table th:last-child { width: 56px; }
+.scene-table th:last-child { width: 64px; }
 .scene-table td { padding: 3px 4px; border-bottom: 1px solid #eef2f6; }
 .cell-input {
   width: 100%; padding: 7px 6px; font-size: 14px; color: #2a3440;
   border: 1px solid #dbe3ea; border-radius: 6px;
   background: #fff; outline: none;
 }
+/* 各列最小宽度：保证价格内容完整显示，窗口不够宽时表格整体横向滚动 */
+.cell-input[data-field="name"] { min-width: 150px; }
+.cell-input[data-field="rate"] { min-width: 90px; }
+.cell-input[data-field="custom"] { min-width: 100px; }
+.cell-input[data-field="wm"], .cell-input[data-field="final"] { min-width: 190px; }
 .cell-input:hover { border-color: #b9cadd; }
 .cell-input:focus { border-color: #3aa0d8; }
 .cell-input.gold-border { border-color: #b07d1a; }
@@ -166,6 +175,7 @@ td.rank-no { color: #8a97a5; }
 .row-del {
   padding: 5px 10px; font-size: 13px; cursor: pointer;
   color: #d64541; background: #fdeceb; border: none; border-radius: 6px;
+  white-space: nowrap;
 }
 .row-del:hover { background: #f9d7d5; }
 .add-row-btn {
@@ -174,8 +184,11 @@ td.rank-no { color: #8a97a5; }
   background: #eaf3fa; border: 1px dashed #b9cadd; border-radius: 8px;
 }
 .add-row-btn:hover { border-color: #3aa0d8; background: #dcecf8; }
-.profit-row td { padding: 10px 4px 4px; border-top: 2px solid #d3dde5; border-bottom: none; vertical-align: middle; }
-.profit-label-inner { display: flex; align-items: center; justify-content: space-between; }
+.profit-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 4px 0; border-top: 2px solid #d3dde5; margin-top: 2px;
+}
+.profit-row .time-label, .profit-row .profit-text { white-space: nowrap; }
 .time-group { display: flex; align-items: center; gap: 8px; }
 .time-label { font-size: 13px; color: #6b7a89; }
 .time-input {
@@ -186,10 +199,25 @@ td.rank-no { color: #8a97a5; }
 .update-btn {
   padding: 5px 14px; font-size: 13px; cursor: pointer;
   color: #fff; background: #2b87c0; border: none; border-radius: 6px;
+  white-space: nowrap;  /* 避免「更新数据」被挤成两行 */
 }
 .update-btn:hover { background: #3aa0d8; }
 .profit-text { font-size: 15px; color: #1c2733; }
 #profit-value { color: #b07d1a; font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+/* 可编辑的场景标题 */
+.scene-title-input {
+  width: 100%; padding: 2px 0 2px 12px;
+  font-family: inherit; font-size: 20px; font-weight: 700;
+  color: #1c2733; letter-spacing: 1px;
+  border: none; border-left: 4px solid #2b87c0; border-bottom: 1px solid transparent;
+  background: transparent; outline: none;
+}
+.scene-title-input:hover { border-bottom-color: #d3dde5; }
+.scene-title-input:focus { border-bottom-color: #3aa0d8; background: #fff; }
+
+/* 场景表格名称列的补全下拉（固定定位跟随单元格） */
+.suggest.cell-suggest { position: fixed; z-index: 60; }
 
 /* ---- 弹窗 ---- */
 .modal-mask {
@@ -262,8 +290,8 @@ td.rank-no { color: #8a97a5; }
       </section>
     </section>
     <section id="view-scene" class="view hidden">
-      <h2 id="scene-title"></h2>
-      <p class="sub">表格数据暂不保存</p>
+      <input id="scene-title" class="scene-title-input" maxlength="20" spellcheck="false" autocomplete="off" title="点击可修改场景名称">
+      <p class="sub">表格数据自动保存，重新打开不丢失</p>
       <div class="scene-card">
         <table class="scene-table">
           <thead>
@@ -281,22 +309,17 @@ td.rank-no { color: #8a97a5; }
             <tr class="add-row-tr">
               <td colspan="6"><button id="add-row" class="add-row-btn">＋ 新增物品</button></td>
             </tr>
-            <tr class="profit-row">
-              <td colspan="4" class="profit-label">
-                <div class="profit-label-inner">
-                  <span class="time-group">
-                    <span class="time-label">上次查询时间：</span>
-                    <input id="update-time" class="time-input" value="未查询" readonly>
-                    <button id="update-data" class="update-btn">更新数据</button>
-                  </span>
-                  <span class="profit-text">收益计算：</span>
-                </div>
-              </td>
-              <td><span id="profit-value">0</span></td>
-              <td></td>
-            </tr>
           </tfoot>
         </table>
+        <!-- 收益信息放在表格外，避免撑宽表格列 -->
+        <div class="profit-row">
+          <span class="time-group">
+            <span class="time-label">上次查询时间：</span>
+            <input id="update-time" class="time-input" value="未查询" readonly>
+            <button id="update-data" class="update-btn">更新数据</button>
+          </span>
+          <span class="profit-text">收益计算：<span id="profit-value">0</span></span>
+        </div>
       </div>
     </section>
   </main>
@@ -358,6 +381,7 @@ const SCENE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 
 let scenes = [];          // 全部自定义场景
 let activeSceneId = null; // 当前选中的场景（null 表示在物品查询页）
+let sceneData = null;     // 当前场景的完整数据 {id, name, elements, update_time}
 let modalMode = null;     // 'create' 或 'delete'
 let deleteTargetId = null;
 
@@ -387,20 +411,35 @@ function renderScenes() {
 }
 
 function switchToQuery() {
+  flushSceneSave();
   activeSceneId = null;
+  sceneData = null;
   viewQuery.classList.remove('hidden');
   viewScene.classList.add('hidden');
   navQuery.classList.add('active');
+  document.querySelector('main').classList.remove('wide');
   renderScenes();
 }
 
-function switchToScene(scene) {
+async function switchToScene(scene) {
+  flushSceneSave();
   activeSceneId = scene.id;
   viewQuery.classList.add('hidden');
   viewScene.classList.remove('hidden');
-  sceneTitle.textContent = scene.name;
   navQuery.classList.remove('active');
+  document.querySelector('main').classList.add('wide');
+  sceneTitle.value = scene.name;
   renderScenes();
+
+  // 读取该场景的持久化数据，接口异常时回退为空场景
+  try {
+    const res = await fetch('/api/scenes/' + encodeURIComponent(scene.id));
+    if (!res.ok) throw new Error();
+    sceneData = await res.json();
+  } catch (e) {
+    sceneData = { id: scene.id, name: scene.name, elements: [], update_time: null };
+  }
+  renderSceneRows();
 }
 
 navQuery.addEventListener('click', switchToQuery);
@@ -510,26 +549,111 @@ sceneListBox.addEventListener('click', e => {
   if (item) switchToScene({ id: item.dataset.id, name: item.dataset.name });
 });
 
-// ---- 场景表格（UI样品：数据暂不持久化） ----
+// ---- 场景表格（数据持久化到该场景的 json 文件） ----
 const sceneRows = $('scene-rows'), addRowBtn = $('add-row'), profitValue = $('profit-value');
 
-function sceneRowHtml(name, rate) {
+function sceneRowHtml(name, rate, custom, wm) {
   return `<tr>
-    <td><input class="cell-input" data-field="name" value="${escapeHtml(name)}"></td>
+    <td><input class="cell-input" data-field="name" value="${escapeHtml(name)}" autocomplete="off" spellcheck="false"></td>
     <td><input class="cell-input rate" data-field="rate" value="${escapeHtml(rate)}"></td>
-    <td><input class="cell-input num" data-field="custom" placeholder=""></td>
-    <td><input class="cell-input num" data-field="wm" placeholder=""></td>
+    <td><input class="cell-input num" data-field="custom" value="${escapeHtml(custom)}"></td>
+    <td><input class="cell-input num" data-field="wm" value="${escapeHtml(wm)}" placeholder=""></td>
     <td><input class="cell-input num" data-field="final" readonly></td>
     <td><button class="row-del">删除</button></td>
   </tr>`;
 }
 
 function renderSceneRows() {
-  // 新页面只创建一行空行
-  sceneRows.innerHTML = sceneRowHtml('', '');
+  // 没有保存过的场景显示一行空行，有数据时按保存的行渲染
+  const elements = (sceneData && Array.isArray(sceneData.elements) && sceneData.elements.length)
+    ? sceneData.elements : [{}];
+
+  sceneRows.innerHTML = elements.map(el =>
+    sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.wm || '')).join('');
+
   syncRowStates();
   updateProfit();
+  updateUpdateTime();
 }
+
+// ---- 场景数据保存（输入后 400ms 防抖，切换场景前立即保存） ----
+let saveTimer = null;
+
+function collectRows() {
+  return [...sceneRows.querySelectorAll('tr')].map(tr => ({
+    name: tr.querySelector('[data-field="name"]').value.trim(),
+    rate: tr.querySelector('[data-field="rate"]').value.trim(),
+    custom: tr.querySelector('[data-field="custom"]').value.trim(),
+    wm: tr.querySelector('[data-field="wm"]').value.trim(),
+  }));
+}
+
+async function saveScene(extra = {}) {
+  if (!sceneData) return null;
+
+  const body = Object.assign({
+    elements: collectRows(),
+    update_time: sceneData.update_time || null,
+  }, extra);
+
+  try {
+    const res = await fetch('/api/scenes/' + encodeURIComponent(sceneData.id), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return res.ok ? await res.json() : null;
+  } catch (e) {
+    return null;  // 保存失败不打断使用，下次修改会再次尝试
+  }
+}
+
+function scheduleSceneSave() {
+  if (!sceneData) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { saveTimer = null; saveScene(); }, 400);
+}
+
+function flushSceneSave() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    saveScene();
+  }
+}
+
+function updateUpdateTime() {
+  $('update-time').value = (sceneData && sceneData.update_time) ? fmtTime(sceneData.update_time) : '未查询';
+}
+
+// ---- 场景标题改名：保存后同步侧边栏（场景ID随名称变化） ----
+sceneTitle.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); sceneTitle.blur(); }
+  if (e.key === 'Escape') { sceneTitle.value = sceneData ? sceneData.name : ''; sceneTitle.blur(); }
+});
+
+sceneTitle.addEventListener('blur', async () => {
+  if (!sceneData) return;
+
+  const name = sceneTitle.value.trim();
+
+  if (!name || name === sceneData.name) {
+    sceneTitle.value = sceneData.name;  // 空名称或没改时恢复
+    return;
+  }
+
+  const data = await saveScene({ name });
+
+  if (data && data.id) {
+    sceneData = data;
+    activeSceneId = data.id;
+    sceneTitle.title = '点击可修改场景名称';
+    await loadScenes();  // 重新渲染侧边栏（新名称与选中高亮）
+  } else {
+    sceneTitle.title = '修改失败：名称重复、为空或含非法字符';
+    sceneTitle.value = sceneData.name;
+  }
+});
 
 function parseNum(v) {
   const n = parseFloat(String(v).replace('%', ''));
@@ -553,7 +677,7 @@ function parseRate(v) {
 
 // 联动规则：
 // - 最终价格 = 自定义价格有值取自定义价格，否则取 wm查询价格
-// - 自定义价格有值 -> wm查询价格只读且清空，自定义边框金色
+// - 自定义价格有值 -> wm查询价格只读并置灰，但保留已有内容；自定义边框金色
 // - 自定义价格无值且 wm 有值 -> wm 边框金色
 // - 掉率格式非法 -> 红底报错
 function syncRowStates() {
@@ -566,9 +690,9 @@ function syncRowStates() {
     const hasCustom = custom.value.trim() !== '';
 
     wm.readOnly = hasCustom;
-    if (hasCustom && wm.value !== '') wm.value = '';
 
     // 最终价格：自定义价格优先，其次 wm查询价格
+    // wm 值为「9（8/9/10）」这类格式时 parseFloat 取均值，「价格数据过少」等文字按 0 计
     final.value = hasCustom ? custom.value.trim() : wm.value.trim();
 
     // 金色边框规则
@@ -596,21 +720,195 @@ function updateProfit() {
 sceneRows.addEventListener('click', e => {
   if (e.target.closest('.row-del')) {
     e.target.closest('tr').remove();
+    hideCellSuggest();
     updateProfit();
+    scheduleSceneSave();
   }
 });
 
-sceneRows.addEventListener('input', () => {
+sceneRows.addEventListener('input', e => {
   syncRowStates();
   updateProfit();
+  scheduleSceneSave();
+
+  // 名称列输入时显示物品补全，其他列输入时收起
+  if (e.target.dataset && e.target.dataset.field === 'name') {
+    cellInput = e.target;
+    renderCellSuggest();
+  } else if (cellInput) {
+    hideCellSuggest();
+  }
+});
+
+// 焦点进入名称列时也提供补全（已有内容可继续修改）
+sceneRows.addEventListener('focusin', e => {
+  if (e.target.dataset && e.target.dataset.field === 'name') {
+    cellInput = e.target;
+    renderCellSuggest();
+  } else if (cellInput) {
+    hideCellSuggest();
+  }
+});
+
+// 名称列补全的键盘操作：上下选择、回车填入、Esc 收起
+sceneRows.addEventListener('keydown', e => {
+  if (!cellInput || e.target !== cellInput || cellSuggest.classList.contains('hidden')) return;
+
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    cellActive = (cellActive + step + cellCurrent.length) % cellCurrent.length;
+    [...cellSuggest.children].forEach((li, i) => li.classList.toggle('active', i === cellActive));
+    if (cellSuggest.children[cellActive]) {
+      cellSuggest.children[cellActive].scrollIntoView({ block: 'nearest' });
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (cellActive >= 0 && cellCurrent[cellActive]) cellInput.value = cellCurrent[cellActive];
+    hideCellSuggest();
+    syncRowStates();
+    updateProfit();
+    scheduleSceneSave();
+  } else if (e.key === 'Escape') {
+    hideCellSuggest();
+  }
 });
 
 addRowBtn.addEventListener('click', () => {
-  sceneRows.insertAdjacentHTML('beforeend', sceneRowHtml('', ''));
+  sceneRows.insertAdjacentHTML('beforeend', sceneRowHtml('', '', '', ''));
   syncRowStates();
+  scheduleSceneSave();
 });
 
 renderSceneRows();
+
+// ---- 场景表格名称列的自动补全（数据源与查询框相同：全部物品名） ----
+const cellSuggest = document.createElement('ul');
+cellSuggest.className = 'suggest cell-suggest hidden';
+document.body.appendChild(cellSuggest);
+
+let cellCurrent = [];  // 当前显示的候选
+let cellActive = -1;   // 键盘选中的候选下标
+let cellInput = null;  // 正在补全的输入框
+
+function renderCellSuggest() {
+  if (!cellInput) return;
+
+  const q = cellInput.value.trim().toLowerCase();
+
+  if (!q) { hideCellSuggest(); return; }
+
+  cellCurrent = names.filter(n => n.toLowerCase().includes(q)).slice(0, 50);
+  cellActive = -1;
+
+  if (!cellCurrent.length) { hideCellSuggest(); return; }
+
+  cellSuggest.innerHTML = cellCurrent.map(n => `<li>${highlight(n, q)}</li>`).join('');
+  cellSuggest.classList.remove('hidden');
+
+  // 下拉固定定位到输入框正下方，宽度不足 220px 时取 220px
+  const r = cellInput.getBoundingClientRect();
+  cellSuggest.style.left = r.left + 'px';
+  cellSuggest.style.top = r.bottom + 4 + 'px';
+  cellSuggest.style.right = 'auto';
+  cellSuggest.style.width = Math.max(r.width, 220) + 'px';
+}
+
+function hideCellSuggest() {
+  cellSuggest.classList.add('hidden');
+  cellCurrent = [];
+  cellActive = -1;
+  cellInput = null;
+}
+
+// 用 mousedown 保证在输入框失去焦点前填入
+cellSuggest.addEventListener('mousedown', e => {
+  const li = e.target.closest('li');
+  const index = [...cellSuggest.children].indexOf(li);
+
+  if (index >= 0 && cellInput) {
+    e.preventDefault();
+    const target = cellInput;
+    target.value = cellCurrent[index];
+    hideCellSuggest();
+    syncRowStates();
+    updateProfit();
+    scheduleSceneSave();
+  }
+});
+
+document.addEventListener('click', e => {
+  if (cellInput && e.target !== cellInput && !e.target.closest('.cell-suggest')) {
+    hideCellSuggest();
+  }
+});
+
+// ---- 更新数据：逐行查询 wm 价格并写入表格，之后刷新上次查询时间 ----
+const updateBtn = $('update-data');
+let updating = false;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// WM 接口限速：1 秒至多 3 次，按 400ms 间隔串行请求（实际约 2.5 次/秒）
+let lastPriceQueryAt = 0;
+
+async function pacePriceQuery() {
+  const wait = 400 - (Date.now() - lastPriceQueryAt);
+  if (wait > 0) await sleep(wait);
+  lastPriceQueryAt = Date.now();
+}
+
+updateBtn.addEventListener('click', async () => {
+  if (updating || !sceneData) return;
+
+  updating = true;
+  updateBtn.disabled = true;
+  updateBtn.textContent = '查询中...';
+
+  for (const tr of sceneRows.querySelectorAll('tr')) {
+    const name = tr.querySelector('[data-field="name"]').value.trim();
+    const custom = tr.querySelector('[data-field="custom"]').value.trim();
+    const wm = tr.querySelector('[data-field="wm"]');
+
+    // 名称或自定义价格已有值的行不查询
+    if (!name || custom !== '') continue;
+
+    await pacePriceQuery();
+
+    try {
+      const res = await fetch('/api/price?name=' + encodeURIComponent(name));
+
+      if (!res.ok) {
+        // 404 物品不存在，其他状态（如 502 网络失败）按查询失败处理
+        wm.value = res.status === 404 ? '物品不存在' : '查询失败';
+      } else {
+        const data = await res.json();
+
+        if (!Array.isArray(data.prices) || data.prices.length < 3) {
+          wm.value = '在售数据过少';
+        } else {
+          // 显示为「9（8/9/10）」，赋能已折算为单个价格
+          wm.value = `${data.avg}（${data.prices.join('/')}）`;
+        }
+      }
+    } catch (e) {
+      wm.value = '查询失败';
+    }
+
+    syncRowStates();
+    updateProfit();
+  }
+
+  sceneData.update_time = Date.now() / 1000;
+  updateUpdateTime();
+  saveScene();  // 立即保存查询结果和时间
+
+  updating = false;
+  updateBtn.disabled = false;
+  updateBtn.textContent = '更新数据';
+});
 
 // ---- 场景弹窗（新增命名 / 删除确认） ----
 function openModal(mode, scene) {

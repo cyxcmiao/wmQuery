@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import webbrowser
@@ -287,6 +288,45 @@ def ensure_cache_dir():
     os.makedirs(CACHE_DIR, exist_ok=True)
 
 
+def validate_scene_name(name):
+    """校验场景名称，返回错误信息，通过时返回 None"""
+
+    if not name:
+        return "场景名称不能为空"
+
+    if len(name) > 20:
+        return "场景名称最多 20 个字符"
+
+    if set(name) <= {"."}:
+        return "场景名称不能只包含点号"
+
+    if not SCENE_ID_PATTERN.match(f"scene_{name}"):
+        return "名称不能包含 \\ / : * ? \" < > | 或空格等字符"
+
+    return None
+
+
+def load_scene(scene_id):
+    """读取单个场景文件的完整数据，ID 无效、文件不存在或损坏时返回 None"""
+
+    if not SCENE_ID_PATTERN.match(scene_id):
+        return None
+
+    scene_path = os.path.join(CACHE_DIR, f"{scene_id}.json")
+
+    try:
+        with open(scene_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict) and data.get("id"):
+            return data
+
+    except (OSError, ValueError):
+        pass  # 文件损坏时当作场景不存在
+
+    return None
+
+
 def list_scenes():
     """读取 cache/ 下所有场景文件，优先按 order 字段排序，其次按修改时间"""
 
@@ -338,20 +378,12 @@ def api_scenes_create():
     """新增查询场景，文件名形如 scene_赏金.json"""
 
     name = (request.get_json(silent=True) or {}).get("name", "").strip()
+    error = validate_scene_name(name)
 
-    if not name:
-        return jsonify({"error": "场景名称不能为空"}), 400
-
-    if len(name) > 20:
-        return jsonify({"error": "场景名称最多 20 个字符"}), 400
-
-    if set(name) <= {"."}:
-        return jsonify({"error": "场景名称不能只包含点号"}), 400
+    if error:
+        return jsonify({"error": error}), 400
 
     scene_id = f"scene_{name}"
-
-    if not SCENE_ID_PATTERN.match(scene_id):
-        return jsonify({"error": "名称不能包含 \\ / : * ? \" < > | 或空格等字符"}), 400
 
     ensure_cache_dir()
 
@@ -361,8 +393,12 @@ def api_scenes_create():
         return jsonify({"error": f"场景「{name}」已存在"}), 409
 
     with open(scene_path, "w", encoding="utf-8") as f:
-        # elements 字段预留给该场景页面的后续内容
-        json.dump({"id": scene_id, "name": name, "elements": []}, f, ensure_ascii=False)
+        # elements 存表格行，update_time 存上次查询时间，均在场景页保存
+        json.dump(
+            {"id": scene_id, "name": name, "elements": [], "update_time": None},
+            f,
+            ensure_ascii=False
+        )
 
     return jsonify({"id": scene_id, "name": name}), 201
 
@@ -417,6 +453,105 @@ def api_scenes_delete(scene_id):
             return jsonify({"error": "删除失败"}), 500
 
     return jsonify({"ok": True})
+
+
+@app.route("/api/scenes/<scene_id>", methods=["GET"])
+def api_scene_get(scene_id):
+    """读取单个场景的完整数据（表格行、上次查询时间）"""
+
+    data = load_scene(scene_id)
+
+    if data is None:
+        return jsonify({"error": "场景不存在"}), 404
+
+    return jsonify({
+        "id": data["id"],
+        "name": data.get("name", ""),
+        "elements": data.get("elements", []),
+        "update_time": data.get("update_time"),
+    })
+
+
+@app.route("/api/scenes/<scene_id>", methods=["PUT"])
+def api_scene_save(scene_id):
+    """保存场景内容：表格行、上次查询时间，支持同时改名
+
+    改名时场景ID和 json 文件名同步更新（scene_旧名.json -> scene_新名.json）。
+    """
+
+    data = load_scene(scene_id)
+
+    if data is None:
+        return jsonify({"error": "场景不存在"}), 404
+
+    body = request.get_json(silent=True) or {}
+    new_id = scene_id
+
+    if "name" in body:
+        name = str(body.get("name") or "").strip()
+        error = validate_scene_name(name)
+
+        if error:
+            return jsonify({"error": error}), 400
+
+        data["name"] = name
+        new_id = f"scene_{name}"
+
+        if new_id != scene_id and os.path.exists(os.path.join(CACHE_DIR, f"{new_id}.json")):
+            return jsonify({"error": f"场景「{name}」已存在"}), 409
+
+    if "elements" in body:
+        elements = body["elements"]
+
+        if not isinstance(elements, list):
+            return jsonify({"error": "无效的表格数据"}), 400
+
+        clean = []
+
+        for row in elements:
+            if not isinstance(row, dict):
+                continue
+
+            clean.append({
+                "name": str(row.get("name", "")).strip()[:100],
+                "rate": str(row.get("rate", "")).strip()[:20],
+                "custom": str(row.get("custom", "")).strip()[:20],
+                "wm": str(row.get("wm", "")).strip()[:20],
+            })
+
+        data["elements"] = clean
+
+    if "update_time" in body:
+        update_time = body["update_time"]
+
+        if isinstance(update_time, (int, float)) or update_time is None:
+            data["update_time"] = update_time
+        else:
+            return jsonify({"error": "无效的查询时间"}), 400
+
+    try:
+        if new_id != scene_id:
+            os.replace(
+                os.path.join(CACHE_DIR, f"{scene_id}.json"),
+                os.path.join(CACHE_DIR, f"{new_id}.json"),
+            )
+
+        data["id"] = new_id
+
+        ensure_cache_dir()
+
+        with open(os.path.join(CACHE_DIR, f"{new_id}.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    except OSError:
+        return jsonify({"error": "保存失败"}), 500
+
+    return jsonify({
+        "id": data["id"],
+        "name": data.get("name", ""),
+        "elements": data.get("elements", []),
+        "update_time": data.get("update_time"),
+    })
 
 
 @app.route("/api/items")
@@ -505,6 +640,82 @@ def api_query():
         },
         "orders": top5,
         "history": history,
+    })
+
+
+@app.route("/api/price")
+def api_price():
+    """按物品名称查询场景表格用的价格：游戏中卖单最低3个的平均价
+
+    赋能类先查满级价格，再除以升满级所需数量折算为单个赋能的价格。
+    """
+
+    name = request.args.get("name", "").strip()
+
+    if not name:
+        return jsonify({"error": "请输入物品名称"}), 400
+
+    item = find_item(ITEMS, name)
+
+    if item is None:
+        suggestions = [n for n in NAME_LIST if name in n][:8]
+        return jsonify({
+            "error": f"没有找到物品：{name}",
+            "suggestions": suggestions
+        }), 404
+
+    try:
+        orders = get_orders(item["slug"])
+    except requests.RequestException:
+        return jsonify({
+            "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
+        }), 502
+
+    # 与 /api/query 相同的筛选规则：赋能只看满级，MOD 和其他物品只看0级
+    max_rank = item.get("maxRank")
+    need_count = RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None
+
+    filtered = []
+
+    for order in orders:
+
+        if order["type"] != "sell":
+            continue
+
+        if order["user"]["status"] != "ingame":
+            continue
+
+        if max_rank is None:
+            if order.get("rank", 0) != 0:
+                continue
+        elif order.get("rank") != max_rank:
+            continue
+
+        filtered.append(order)
+
+    filtered.sort(key=lambda order: order["platinum"])
+
+    top3 = [order["platinum"] for order in filtered[:3]]
+
+    if not top3:
+        return jsonify({
+            "name": item["i18n"]["zh-hans"]["name"],
+            "need_count": need_count,
+            "prices": [],
+            "avg": None,
+        })
+
+    # 赋能折算为单个价格：均价按原始价计算，展示价格逐个折算并至多保留两位小数
+    def to_unit(price):
+        return round(price / need_count, 2) if need_count else price
+
+    avg = sum(top3) / len(top3)
+
+    return jsonify({
+        "name": item["i18n"]["zh-hans"]["name"],
+        "need_count": need_count,
+        "prices": [to_unit(p) for p in top3],
+        "avg": round(avg / need_count, 2) if need_count else round(avg, 2),
     })
 
 
