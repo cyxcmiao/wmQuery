@@ -2,14 +2,17 @@ from auto_install import ensure_package
 
 # 检测到没有安装时，自动通过 pip 安装
 ensure_package("requests")
-ensure_package("prompt_toolkit")
+ensure_package("flask")
 
-import requests
-import unicodedata
 import json
 import os
-import sys
+import socket
+import threading
 import time
+import webbrowser
+
+import requests
+from flask import Flask, jsonify, request, send_from_directory
 
 BASE_URL = "https://api.warframe.market/v2"
 
@@ -23,6 +26,14 @@ HEADERS = {
 # 物品列表本地缓存（存在脚本同目录）
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "items_cache.json")
 CACHE_TTL_HOURS = 24  # 缓存有效时长（小时），超过后自动重新下载
+
+# 启动后加载的数据（供补全和查找使用）
+ITEMS = []
+NAME_LIST = []
+
+WEB_DIR = os.path.dirname(os.path.abspath(__file__))
+
+app = Flask(__name__, static_folder=None)
 
 
 def load_items_cache(max_age_hours):
@@ -77,7 +88,7 @@ def save_items_cache(items):
 
 
 def get_all_items():
-    """获取全部物品列表（同时用于 Tab 补全和查找），优先使用本地缓存"""
+    """获取全部物品列表（同时用于补全和查找），优先使用本地缓存"""
 
     cached = load_items_cache(CACHE_TTL_HOURS)
 
@@ -144,233 +155,128 @@ def get_orders(item_slug):
     return response.json()["data"]
 
 
-def is_interactive_terminal():
-    """当前是否运行在真实终端里（PyCharm/VSCode 运行窗口等会返回 False）"""
+@app.route("/")
+def index():
+    """查询页面"""
 
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
-def input_item_name(item_names):
-    """输入物品名称：真实终端下带 Tab 自动补全，其他环境用编号选择"""
-
-    if not is_interactive_terminal():
-        print("（当前不是真实终端，Tab 补全不可用，改为：输入部分名称后按编号选择）")
-        return input_item_name_by_number(item_names)
-
-    try:
-        from prompt_toolkit import prompt
-        from prompt_toolkit.completion import WordCompleter
-    except ImportError:
-        return input_item_name_by_number(item_names)
-
-    completer = WordCompleter(
-        item_names,
-        sentence=True,      # 把整行输入当作待补全文本（物品名里含空格也能整句匹配）
-        match_middle=True,  # 输入"斩铁"也能匹配到"镀层 斩铁"这类包含关系的名字
-    )
-
-    try:
-        return prompt(
-            "请输入物品名称：",
-            completer=completer,
-            complete_while_typing=True  # 输入过程中就显示候选列表
-        ).strip()
-    except Exception as error:
-        # 补全库在当前终端初始化失败时，打印原因并退回编号选择
-        print(f"（Tab 补全在此终端不可用：{error!r}，改为编号选择模式）")
-        return input_item_name_by_number(item_names)
+    return send_from_directory(WEB_DIR, "index.html")
 
 
-def input_item_name_by_number(item_names):
-    """编号选择模式的输入：输入部分名称 -> 列出所有匹配 -> 按编号选择"""
+@app.route("/api/items")
+def api_items():
+    """全部物品名称，供输入框自动补全"""
 
-    text = input("请输入物品名称（可只输入一部分）：").strip()
-
-    if not text:
-        return text
-
-    matches = [name for name in item_names if text in name]
-
-    if not matches:
-        return text
-
-    if len(matches) == 1:
-        print(f"匹配到唯一物品：{matches[0]}")
-        return matches[0]
-
-    shown = matches[:15]
-
-    print(f"匹配到 {len(matches)} 个物品：")
-
-    for number, name in enumerate(shown, start=1):
-        print(f"  {number}. {name}")
-
-    if len(matches) > 15:
-        print("  （候选过多，只显示前 15 个，请输入更精确的名称）")
-        return text
-
-    choice = input("请输入编号选择，直接回车则按原文查找：").strip()
-
-    if choice.isdigit() and 1 <= int(choice) <= len(shown):
-        return shown[int(choice) - 1]
-
-    return text
+    return jsonify(NAME_LIST)
 
 
-def display_width(text):
-    """计算字符串在终端里的显示宽度：中文等全角字符算 2 格，其他算 1 格"""
+@app.route("/api/query")
+def api_query():
+    """查询指定物品的游戏内最低价卖单前5"""
 
-    width = 0
+    name = request.args.get("name", "").strip()
 
-    for char in text:
+    if not name:
+        return jsonify({"error": "请输入物品名称"}), 400
 
-        if unicodedata.combining(char):
-            continue
-
-        if unicodedata.east_asian_width(char) in ("W", "F"):
-            width += 2
-        else:
-            width += 1
-
-    return width
-
-
-def pad_text(text, width, align="left"):
-    """把文本补空格到指定显示宽度，保证中英文混排也能对齐"""
-
-    spaces = max(width - display_width(text), 0)
-
-    if align == "right":
-        return " " * spaces + text
-
-    return text + " " * spaces
-
-
-def print_top5(orders):
-    """以对齐的表格形式打印前5订单"""
-
-    headers = ["#", "价格(白金)", "玩家", "数量", "等级"]
-    aligns = ["left", "right", "left", "right", "right"]
-
-    rows = [
-        [
-            str(index),
-            str(order["platinum"]),
-            order["user"]["ingameName"],
-            str(order["quantity"]),
-            str(order.get("rank", 0)),
-        ]
-        for index, order in enumerate(orders, start=1)
-    ]
-
-    if not rows:
-        print("没有符合条件的订单")
-        return
-
-    # 每列取最大显示宽度作为列宽
-    widths = [
-        max(display_width(row[column]) for row in rows + [headers])
-        for column in range(len(headers))
-    ]
-
-    def format_row(cells):
-        padded = [
-            pad_text(cell, widths[column], aligns[column])
-            for column, cell in enumerate(cells)
-        ]
-        return "  ".join(padded).rstrip()
-
-    header_line = format_row(headers)
-
-    print()
-    print("游戏中玩家最低价前5：")
-    print("-" * display_width(header_line))
-    print(header_line)
-
-    for row in rows:
-        print(format_row(row))
-
-
-def main():
-
-    # -------------------------
-    # 1. 加载物品列表（用于 Tab 补全和查找）
-    # -------------------------
-
-    print("正在加载物品列表...")
-
-    items = get_all_items()
-
-    item_names = [
-        item["i18n"]["zh-hans"]["name"]
-        for item in items
-        if item.get("i18n", {}).get("zh-hans")
-    ]
-
-    # 去重，保持原有顺序
-    item_names = list(dict.fromkeys(item_names))
-
-    # -------------------------
-    # 2. 输入物品名称（Tab 自动补全）
-    # -------------------------
-
-    item_name = input_item_name(item_names)
-
-    item = find_item(items, item_name)
+    item = find_item(ITEMS, name)
 
     if item is None:
-        print("没有找到这个物品")
-        return
+        # 没找到时给出相似的物品名，方便纠正输入
+        suggestions = [n for n in NAME_LIST if name in n][:8]
 
-    print()
-    print("找到物品：")
-    print("中文名称：", item["i18n"]["zh-hans"]["name"])
-    print("英文名称：", item["i18n"]["en"]["name"])
-    print("slug：", item["slug"])
-
-    # -------------------------
-    # 3. 获取订单
-    # -------------------------
+        return jsonify({
+            "error": f"没有找到物品：{name}",
+            "suggestions": suggestions
+        }), 404
 
     orders = get_orders(item["slug"])
 
-    # -------------------------
-    # 4. 筛选订单
-    # -------------------------
-
-    filtered_orders = []
+    # 只看游戏中玩家的0级卖单
+    filtered = []
 
     for order in orders:
 
-        # 只看卖单
         if order["type"] != "sell":
             continue
 
-        # 只看游戏中的玩家
         if order["user"]["status"] != "ingame":
             continue
 
-        # MOD只看0级
         if order.get("rank", 0) != 0:
             continue
 
-        filtered_orders.append(order)
+        filtered.append(order)
 
-    # -------------------------
-    # 5. 按价格从低到高排序
-    # -------------------------
+    # 按价格从低到高排序，取前5
+    filtered.sort(key=lambda order: order["platinum"])
 
-    filtered_orders.sort(
-        key=lambda order: order["platinum"]
-    )
+    top5 = [
+        {
+            "platinum": order["platinum"],
+            "player": order["user"]["ingameName"],
+            "quantity": order["quantity"],
+        }
+        for order in filtered[:5]
+    ]
 
-    # -------------------------
-    # 6. 取前5
-    # -------------------------
+    return jsonify({
+        "item": {
+            "name": item["i18n"]["zh-hans"]["name"],
+            "name_en": item["i18n"]["en"]["name"],
+            "slug": item["slug"],
+        },
+        "orders": top5,
+    })
 
-    top5 = filtered_orders[:5]
 
-    print_top5(top5)
+def find_free_port(start):
+    """从 start 开始找一个未被占用的端口"""
+
+    port = start
+
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                port += 1
+
+
+def open_browser(url):
+    """打开系统默认浏览器"""
+
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass  # 打不开浏览器时用户可手动访问打印出的地址
+
+
+def main():
+    global ITEMS, NAME_LIST
+
+    print("正在加载物品列表...")
+
+    ITEMS = get_all_items()
+
+    # 去重，保持原有顺序
+    NAME_LIST = list(dict.fromkeys(
+        item["i18n"]["zh-hans"]["name"]
+        for item in ITEMS
+        if item.get("i18n", {}).get("zh-hans") and item["i18n"]["zh-hans"].get("name")
+    ))
+
+    print(f"物品列表加载完成，共 {len(NAME_LIST)} 个物品")
+
+    port = find_free_port(8899)
+    url = f"http://127.0.0.1:{port}"
+
+    print(f"查询页面：{url} （关闭本窗口或按 Ctrl+C 退出）")
+
+    # 稍等服务器启动后再打开浏览器
+    threading.Timer(1.0, open_browser, args=(url,)).start()
+
+    app.run(host="127.0.0.1", port=port, debug=False)
 
 
 if __name__ == "__main__":

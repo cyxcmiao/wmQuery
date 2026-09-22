@@ -14,6 +14,12 @@ import importlib.util
 import subprocess
 import sys
 
+# pip 安装源：优先中科大镜像，失败后用官方源重试
+PIP_SOURCES = [
+    ["-i", "https://mirrors.ustc.edu.cn/pypi/simple"],
+    [],
+]
+
 
 def ensure_package(package_name):
     """检测指定库是否已安装，未安装则自动通过 pip 安装
@@ -28,17 +34,21 @@ def ensure_package(package_name):
     print()
     print(f"未检测到 {package_name} 库，正在自动安装...")
 
-    # 使用 sys.executable 保证安装到当前正在运行的 Python（即虚拟环境）
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", package_name]
-    )
+    for source_args in PIP_SOURCES:
 
-    if result.returncode != 0:
-        print()
-        print(f"{package_name} 安装失败，请检查网络后手动安装：")
-        print(f"  {sys.executable} -m pip install {package_name}")
-        sys.exit(1)
+        # 使用 sys.executable 保证安装到当前正在运行的 Python（即虚拟环境）
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", *source_args, package_name]
+        )
+
+        if result.returncode == 0:
+            print()
+            print(f"{package_name} 安装完成")
+            print()
+            return
 
     print()
-    print(f"{package_name} 安装完成")
-    print()
+    print(f"{package_name} 安装失败，请检查网络后手动安装：")
+    print(f"  {sys.executable} -m pip install {package_name} "
+          f"-i https://mirrors.ustc.edu.cn/pypi/simple")
+    sys.exit(1)
