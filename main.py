@@ -20,7 +20,13 @@ from urllib3.util.retry import Retry
 
 BASE_URL = "https://api.warframe.market/v2"
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # 打包成 exe 后：index.html 等资源释放到 _MEIPASS 临时目录，
+    # 缓存和历史等数据文件存放在 exe 同目录，保证可持久保存
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 HEADERS = {
     "Accept": "application/json",
@@ -67,7 +73,7 @@ HISTORY_MAX = 10  # 最多保留条数
 ITEMS = []
 NAME_LIST = []
 
-WEB_DIR = BASE_DIR
+WEB_DIR = RESOURCE_DIR
 
 app = Flask(__name__, static_folder=None)
 
@@ -393,9 +399,9 @@ def api_scenes_create():
         return jsonify({"error": f"场景「{name}」已存在"}), 409
 
     with open(scene_path, "w", encoding="utf-8") as f:
-        # elements 存表格行，update_time 存上次查询时间，均在场景页保存
+        # elements 存表格行，update_time 存上次查询时间，run_time 存单局时间（分钟），均在场景页保存
         json.dump(
-            {"id": scene_id, "name": name, "elements": [], "update_time": None},
+            {"id": scene_id, "name": name, "elements": [], "update_time": None, "run_time": None},
             f,
             ensure_ascii=False
         )
@@ -469,6 +475,7 @@ def api_scene_get(scene_id):
         "name": data.get("name", ""),
         "elements": data.get("elements", []),
         "update_time": data.get("update_time"),
+        "run_time": data.get("run_time"),
     })
 
 
@@ -529,6 +536,17 @@ def api_scene_save(scene_id):
         else:
             return jsonify({"error": "无效的查询时间"}), 400
 
+    if "run_time" in body:
+        run_time = body["run_time"]
+
+        # 单局时间（分钟）：数字或空，0 及负数视为无效
+        if run_time is None:
+            data["run_time"] = None
+        elif isinstance(run_time, (int, float)) and run_time > 0:
+            data["run_time"] = run_time
+        else:
+            return jsonify({"error": "无效的单局时间"}), 400
+
     try:
         if new_id != scene_id:
             os.replace(
@@ -551,6 +569,7 @@ def api_scene_save(scene_id):
         "name": data.get("name", ""),
         "elements": data.get("elements", []),
         "update_time": data.get("update_time"),
+        "run_time": data.get("run_time"),
     })
 
 

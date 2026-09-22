@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Warframe Market 查询</title>
+<title>wmQuery</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -188,6 +188,12 @@ td.rank-no { color: #8a97a5; }
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 4px 0; border-top: 2px solid #d3dde5; margin-top: 2px;
 }
+.profit-row.run-time-row { border-top: none; padding-top: 10px; margin-top: 0; }
+#ppm-value, #pph-value { color: #b07d1a; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* 单局时间可输入，加边框与普通输入框一致 */
+#run-time { border: 1px solid #dbe3ea; border-radius: 6px; background: #fff; }
+#run-time:hover { border-color: #b9cadd; }
+#run-time:focus { border-color: #3aa0d8; outline: none; }
 .profit-row .time-label, .profit-row .profit-text { white-space: nowrap; }
 .time-group { display: flex; align-items: center; gap: 8px; }
 .time-label { font-size: 13px; color: #6b7a89; }
@@ -247,7 +253,7 @@ td.rank-no { color: #8a97a5; }
 </head>
 <body>
 <aside class="sidebar">
-  <div class="brand"><span class="brand-dot"></span>WM 查询工具</div>
+  <div class="brand"><span class="brand-dot"></span>wmQuery</div>
   <button id="add-scene" class="add-btn">＋ 新增查询场景</button>
   <div class="nav-section">置顶</div>
   <div class="nav-item active" id="nav-query">
@@ -319,6 +325,13 @@ td.rank-no { color: #8a97a5; }
             <button id="update-data" class="update-btn">更新数据</button>
           </span>
           <span class="profit-text">收益计算：<span id="profit-value">0</span></span>
+        </div>
+        <div class="profit-row run-time-row">
+          <span class="time-group">
+            <span class="time-label">单局时间(分钟)：</span>
+            <input id="run-time" class="time-input" placeholder="如 3.5" autocomplete="off">
+          </span>
+          <span class="profit-text">白金/分钟：<span id="ppm-value">-</span>　白金/小时：<span id="pph-value">-</span></span>
         </div>
       </div>
     </section>
@@ -437,7 +450,7 @@ async function switchToScene(scene) {
     if (!res.ok) throw new Error();
     sceneData = await res.json();
   } catch (e) {
-    sceneData = { id: scene.id, name: scene.name, elements: [], update_time: null };
+    sceneData = { id: scene.id, name: scene.name, elements: [], update_time: null, run_time: null };
   }
   renderSceneRows();
 }
@@ -571,6 +584,9 @@ function renderSceneRows() {
   sceneRows.innerHTML = elements.map(el =>
     sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.wm || '')).join('');
 
+  // 回填单局时间并重算收益
+  runTimeInput.value = (sceneData && sceneData.run_time) ? sceneData.run_time : '';
+
   syncRowStates();
   updateProfit();
   updateUpdateTime();
@@ -594,6 +610,7 @@ async function saveScene(extra = {}) {
   const body = Object.assign({
     elements: collectRows(),
     update_time: sceneData.update_time || null,
+    run_time: sceneData.run_time || null,
   }, extra);
 
   try {
@@ -715,7 +732,37 @@ function updateProfit() {
   });
 
   profitValue.textContent = profit.toFixed(2) + ' 白金';
+  updateEarnings(profit);
 }
+
+// 按单局时间（分钟）折算白金/分钟和白金/小时
+const runTimeInput = $('run-time');
+
+function updateEarnings(profit) {
+  const minutes = parseFloat(runTimeInput.value);
+
+  if (!isNaN(minutes) && minutes > 0) {
+    $('ppm-value').textContent = (profit / minutes).toFixed(2);
+    $('pph-value').textContent = (profit / minutes * 60).toFixed(2);
+  } else {
+    $('ppm-value').textContent = '-';
+    $('pph-value').textContent = '-';
+  }
+}
+
+// 单局时间输入：重算收益并持久化到场景 json
+runTimeInput.addEventListener('input', () => {
+  const minutes = parseFloat(runTimeInput.value);
+
+  if (!isNaN(minutes) && minutes > 0) {
+    sceneData.run_time = minutes;
+  } else {
+    sceneData.run_time = null;
+  }
+
+  updateProfit();
+  scheduleSceneSave();
+});
 
 sceneRows.addEventListener('click', e => {
   if (e.target.closest('.row-del')) {

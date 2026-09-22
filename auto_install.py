@@ -27,6 +27,10 @@ def ensure_package(package_name):
     :param package_name: 库的名称（与 import 时使用的名称一致，如 requests）
     """
 
+    # 打包成 exe 后依赖已内置，无法（也不需要）通过 pip 安装
+    if getattr(sys, "frozen", False):
+        return
+
     # 在当前解释器中查找该库，找不到说明没有安装
     if importlib.util.find_spec(package_name) is not None:
         return
