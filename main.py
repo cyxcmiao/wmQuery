@@ -6,6 +6,7 @@ ensure_package("flask")
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -17,6 +18,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BASE_URL = "https://api.warframe.market/v2"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 HEADERS = {
     "Accept": "application/json",
@@ -47,18 +50,19 @@ def make_session():
 SESSION = make_session()
 
 # 物品列表本地缓存（存在脚本同目录）
-CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "items_cache.json")
+CACHE_FILE = os.path.join(BASE_DIR, "items_cache.json")
 CACHE_TTL_HOURS = 24  # 缓存有效时长（小时），超过后自动重新下载
 
-# 查询历史（存在脚本同目录，随程序重启持久保留）
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "query_history.json")
+# 持久化目录：查询历史、查询场景都存在 cache/ 下，每个场景一个 json 文件
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
+HISTORY_FILE = os.path.join(CACHE_DIR, "query_history.json")
 HISTORY_MAX = 10  # 最多保留条数
 
 # 启动后加载的数据（供补全和查找使用）
 ITEMS = []
 NAME_LIST = []
 
-WEB_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_DIR = BASE_DIR
 
 app = Flask(__name__, static_folder=None)
 
@@ -185,6 +189,15 @@ def get_orders(item_slug):
 def load_history():
     """读取查询历史，文件不存在或损坏时返回空列表"""
 
+    # 兼容旧版本：历史文件还在脚本根目录时，迁移到 cache/ 下
+    old_history_file = os.path.join(BASE_DIR, "query_history.json")
+
+    if not os.path.exists(HISTORY_FILE) and os.path.exists(old_history_file):
+        try:
+            os.replace(old_history_file, HISTORY_FILE)
+        except OSError:
+            pass
+
     try:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             history = json.load(f)
@@ -208,6 +221,8 @@ def add_history(name, prices=None):
     history.insert(0, {"name": name, "time": time.time(), "prices": prices or []})
     history = history[:HISTORY_MAX]
 
+    ensure_cache_dir()
+
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False)
@@ -229,6 +244,150 @@ def api_history():
     """查询历史"""
 
     return jsonify(load_history())
+
+
+# -------------------------
+# 查询场景：cache/ 下每个场景一个 json 文件，文件名形如 scene_赏金.json
+# -------------------------
+
+# 场景ID即文件名主体，禁止文件系统非法字符和空白符
+SCENE_ID_PATTERN = re.compile(r"^scene_[^\\/:*?\"<>|\s]{1,60}$")
+
+
+def ensure_cache_dir():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def list_scenes():
+    """读取 cache/ 下所有场景文件，优先按 order 字段排序，其次按修改时间"""
+
+    if not os.path.isdir(CACHE_DIR):
+        return []
+
+    scenes = []
+
+    for fname in os.listdir(CACHE_DIR):
+        if not (fname.startswith("scene_") and fname.endswith(".json")):
+            continue
+
+        scene_path = os.path.join(CACHE_DIR, fname)
+
+        try:
+            with open(scene_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            if isinstance(data, dict) and data.get("id") and data.get("name"):
+                order = data.get("order")
+                scenes.append({
+                    "id": data["id"],
+                    "name": data["name"],
+                    "_order": order if isinstance(order, int) else None,
+                    "_mtime": os.path.getmtime(scene_path),
+                })
+
+        except (OSError, ValueError):
+            pass  # 损坏的场景文件直接跳过
+
+    # 有 order 的按 order 排，没有的按修改时间排在后面
+    scenes.sort(key=lambda s: (
+        s["_order"] if s["_order"] is not None else 10 ** 12,
+        s["_mtime"],
+    ))
+
+    return [{"id": s["id"], "name": s["name"]} for s in scenes]
+
+
+@app.route("/api/scenes", methods=["GET"])
+def api_scenes():
+    """全部查询场景"""
+
+    return jsonify(list_scenes())
+
+
+@app.route("/api/scenes", methods=["POST"])
+def api_scenes_create():
+    """新增查询场景，文件名形如 scene_赏金.json"""
+
+    name = (request.get_json(silent=True) or {}).get("name", "").strip()
+
+    if not name:
+        return jsonify({"error": "场景名称不能为空"}), 400
+
+    if len(name) > 20:
+        return jsonify({"error": "场景名称最多 20 个字符"}), 400
+
+    if set(name) <= {"."}:
+        return jsonify({"error": "场景名称不能只包含点号"}), 400
+
+    scene_id = f"scene_{name}"
+
+    if not SCENE_ID_PATTERN.match(scene_id):
+        return jsonify({"error": "名称不能包含 \\ / : * ? \" < > | 或空格等字符"}), 400
+
+    ensure_cache_dir()
+
+    scene_path = os.path.join(CACHE_DIR, f"{scene_id}.json")
+
+    if os.path.exists(scene_path):
+        return jsonify({"error": f"场景「{name}」已存在"}), 409
+
+    with open(scene_path, "w", encoding="utf-8") as f:
+        # elements 字段预留给该场景页面的后续内容
+        json.dump({"id": scene_id, "name": name, "elements": []}, f, ensure_ascii=False)
+
+    return jsonify({"id": scene_id, "name": name}), 201
+
+
+@app.route("/api/scenes/order", methods=["POST"])
+def api_scenes_order():
+    """保存拖动后的场景顺序：把位置写入每个场景文件的 order 字段"""
+
+    ids = (request.get_json(silent=True) or {}).get("ids")
+
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "无效的排序数据"}), 400
+
+    for index, scene_id in enumerate(ids):
+
+        if not isinstance(scene_id, str) or not SCENE_ID_PATTERN.match(scene_id):
+            return jsonify({"error": "无效的场景ID"}), 400
+
+        scene_path = os.path.join(CACHE_DIR, f"{scene_id}.json")
+
+        if not os.path.exists(scene_path):
+            continue  # 列表里有已删除的场景时跳过
+
+        try:
+            with open(scene_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            data["order"] = index
+
+            with open(scene_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+
+        except (OSError, ValueError):
+            pass  # 单个场景排序失败不影响其他场景
+
+    return jsonify(list_scenes())
+
+
+@app.route("/api/scenes/<scene_id>", methods=["DELETE"])
+def api_scenes_delete(scene_id):
+    """删除查询场景"""
+
+    if not SCENE_ID_PATTERN.match(scene_id):
+        return jsonify({"error": "无效的场景ID"}), 400
+
+    scene_path = os.path.join(CACHE_DIR, f"{scene_id}.json")
+
+    if os.path.exists(scene_path):
+        try:
+            os.remove(scene_path)
+        except OSError:
+            return jsonify({"error": "删除失败"}), 500
+
+    return jsonify({"ok": True})
 
 
 @app.route("/api/items")
@@ -336,6 +495,8 @@ def open_browser(url):
 
 def main():
     global ITEMS, NAME_LIST
+
+    ensure_cache_dir()
 
     print("正在加载物品列表...")
 
