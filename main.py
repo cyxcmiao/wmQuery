@@ -52,6 +52,10 @@ SESSION = make_session()
 # 物品列表本地缓存（存在脚本同目录）
 CACHE_FILE = os.path.join(BASE_DIR, "items_cache.json")
 CACHE_TTL_HOURS = 24  # 缓存有效时长（小时），超过后自动重新下载
+CACHE_VERSION = 4  # 缓存结构版本，字段变化时递增以强制刷新旧缓存
+
+# 赋能升到对应等级需要的数量（maxRank -> 个数）
+RANK_NEED_COUNT = {0: 1, 1: 3, 2: 6, 3: 10, 4: 15, 5: 21}
 
 # 持久化目录：查询历史、查询场景都存在 cache/ 下，每个场景一个 json 文件
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
@@ -81,6 +85,9 @@ def load_items_cache(max_age_hours):
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             cache = json.load(f)
 
+        if cache.get("version") != CACHE_VERSION:
+            return None  # 旧版本缓存结构不同，重新下载
+
         age_hours = (time.time() - cache["fetched_at"]) / 3600
 
         if max_age_hours is None or age_hours <= max_age_hours:
@@ -93,24 +100,40 @@ def load_items_cache(max_age_hours):
 
 
 def save_items_cache(items):
-    """把物品列表写入本地缓存，只保留用到的字段减小文件体积"""
+    """把物品列表写入本地缓存，只保留用到的字段减小文件体积
 
-    slim_items = [
-        {
+    赋能类（tags 含 arcane_enhancement 且不含 mod）保留 maxRank，
+    用于筛选满级卖单；MOD 类（tags 含 mod）不保留 maxRank，查询时仍按 0 级计价。
+    """
+
+    slim_items = []
+
+    for item in items:
+        zh_data = item.get("i18n", {}).get("zh-hans")
+        en_data = item.get("i18n", {}).get("en")
+
+        if not (zh_data and en_data):
+            continue
+
+        slim = {
             "slug": item["slug"],
             "i18n": {
-                "zh-hans": {"name": item["i18n"]["zh-hans"]["name"]},
-                "en": {"name": item["i18n"]["en"]["name"]},
+                "zh-hans": {"name": zh_data["name"]},
+                "en": {"name": en_data["name"]},
             },
         }
-        for item in items
-        if item.get("i18n", {}).get("zh-hans") and item.get("i18n", {}).get("en")
-    ]
+
+        tags = item.get("tags") or []
+
+        if "arcane_enhancement" in tags and "mod" not in tags:
+            slim["maxRank"] = item.get("maxRank")
+
+        slim_items.append(slim)
 
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(
-                {"fetched_at": time.time(), "data": slim_items},
+                {"version": CACHE_VERSION, "fetched_at": time.time(), "data": slim_items},
                 f,
                 ensure_ascii=False
             )
@@ -211,14 +234,20 @@ def load_history():
     return []
 
 
-def add_history(name, prices=None):
+def add_history(name, prices=None, need_count=None):
     """记录一次查询：同名条目移到最前并更新时间和全部价格，最多保留 HISTORY_MAX 条
 
     :param prices: 查询结果中前5卖单的白金价格列表（低到高），没有卖单时为空列表
+    :param need_count: 赋能类升到满级需要的数量，其他物品为 None
     """
 
     history = [h for h in load_history() if h.get("name") != name]
-    history.insert(0, {"name": name, "time": time.time(), "prices": prices or []})
+    history.insert(0, {
+        "name": name,
+        "time": time.time(),
+        "prices": prices or [],
+        "need_count": need_count,
+    })
     history = history[:HISTORY_MAX]
 
     ensure_cache_dir()
@@ -425,7 +454,9 @@ def api_query():
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
 
-    # 只看游戏中玩家的0级卖单
+    # 赋能类只看满级卖单（rank == maxRank），MOD 和其他物品只看0级
+    max_rank = item.get("maxRank")
+
     filtered = []
 
     for order in orders:
@@ -436,7 +467,11 @@ def api_query():
         if order["user"]["status"] != "ingame":
             continue
 
-        if order.get("rank", 0) != 0:
+        if max_rank is None:
+            # MOD 按 0 级（未安装）计价
+            if order.get("rank", 0) != 0:
+                continue
+        elif order.get("rank") != max_rank:
             continue
 
         filtered.append(order)
@@ -456,7 +491,8 @@ def api_query():
     # 记录查询历史（只在查询成功时记录，保存前5卖单的全部价格）
     history = add_history(
         item["i18n"]["zh-hans"]["name"],
-        [order["platinum"] for order in top5]
+        [order["platinum"] for order in top5],
+        RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None,
     )
 
     return jsonify({
@@ -464,6 +500,8 @@ def api_query():
             "name": item["i18n"]["zh-hans"]["name"],
             "name_en": item["i18n"]["en"]["name"],
             "slug": item["slug"],
+            # 赋能类显示升到满级需要的数量（如 maxRank=5 需要 21 个）
+            "need_count": RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None,
         },
         "orders": top5,
         "history": history,

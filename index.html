@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="zh-hans">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Warframe Market 查询</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  background: linear-gradient(160deg, #f7f9fb 0%, #eef2f6 100%);
+  color: #2a3440;
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ---- 侧边导航（仿 DeepSeek） ---- */
+.sidebar {
+  width: 232px; flex-shrink: 0;
+  background: #f0f3f6; border-right: 1px solid #e4e8ee;
+  padding: 16px 12px 12px;
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 16px; font-weight: 600; color: #2b87c0;
+  padding: 4px 8px 16px; letter-spacing: 1px;
+}
+.brand-dot {
+  width: 18px; height: 18px; border-radius: 6px; flex-shrink: 0;
+  background: linear-gradient(135deg, #3aa0d8, #1d6fa5);
+}
+.add-btn {
+  width: 100%; padding: 10px 12px; font-size: 14px; cursor: pointer;
+  background: #ffffff; color: #2a3440;
+  border: 1px solid #dbe3ea; border-radius: 999px;
+  box-shadow: 0 1px 3px rgba(16, 36, 56, .06);
+}
+.add-btn:hover { border-color: #3aa0d8; color: #1d6fa5; }
+.nav-section {
+  font-size: 12px; color: #98a5b1;
+  margin: 16px 8px 6px;
+}
+.nav-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px; border-radius: 8px;
+  font-size: 14px; cursor: pointer; user-select: none;
+}
+.nav-item:hover { background: #e6ebf1; }
+.nav-item.active { background: #dbeafe; color: #1d6fa5; font-weight: 500; }
+.nav-item svg { width: 16px; height: 16px; flex-shrink: 0; }
+.scene-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.del-btn {
+  display: none; margin-left: auto; flex-shrink: 0;
+  color: #98a5b1; font-size: 14px; padding: 0 4px; border-radius: 4px;
+}
+.nav-item:hover .del-btn { display: inline; }
+.scene-item.dragging { opacity: .55; background: #dbeafe; }
+body.scene-dragging { cursor: grabbing !important; user-select: none; }
+body.scene-dragging .scene-item { cursor: grabbing; }
+.del-btn:hover { color: #d64541; background: #fdeceb; }
+.sidebar-foot {
+  margin-top: auto; padding: 10px 8px 2px;
+  font-size: 12px; color: #b3bec8;
+}
+
+/* ---- 主内容区 ---- */
+.content {
+  flex: 1; overflow-y: auto;
+  display: flex; justify-content: center;
+  padding: 40px 24px;
+}
+.panel { width: 100%; max-width: 640px; }
+h1 {
+  font-size: 26px; color: #1c2733; letter-spacing: 1px;
+  border-left: 4px solid #2b87c0; padding-left: 14px;
+}
+h2 {
+  font-size: 20px; color: #1c2733; letter-spacing: 1px;
+  border-left: 4px solid #2b87c0; padding-left: 12px;
+}
+.sub { color: #6b7a89; margin: 10px 0 28px; font-size: 14px; }
+.search-box { position: relative; display: flex; gap: 10px; }
+#search {
+  flex: 1; padding: 12px 14px; font-size: 16px;
+  background: #ffffff; border: 1px solid #d3dde5; border-radius: 8px;
+  color: #1f2933; outline: none;
+  box-shadow: 0 1px 3px rgba(16, 36, 56, .05);
+}
+#search:focus { border-color: #3aa0d8; }
+#go {
+  padding: 12px 26px; font-size: 15px; cursor: pointer;
+  background: #2b87c0; color: #fff; border: none; border-radius: 8px;
+}
+#go:hover { background: #3aa0d8; }
+#go:disabled { opacity: .5; cursor: default; }
+.suggest {
+  position: absolute; top: 100%; left: 0; right: 100px; z-index: 10;
+  margin-top: 6px; list-style: none;
+  background: #ffffff; border: 1px solid #d3dde5; border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(16, 36, 56, .10);
+  max-height: 320px; overflow-y: auto;
+}
+.suggest li { padding: 9px 14px; cursor: pointer; font-size: 15px; }
+.suggest li:hover, .suggest li.active { background: #eaf3fa; }
+.suggest b { color: #1d6fa5; }
+.hidden { display: none !important; }
+.hint { color: #6b7a89; font-size: 13px; margin-top: 10px; }
+#status { margin: 22px 0 0; font-size: 14px; color: #a06a00; min-height: 20px; }
+#status.error { color: #d64541; }
+#status .sug {
+  color: #1d6fa5; text-decoration: underline; cursor: pointer;
+  margin: 0 4px;
+}
+#result { margin-top: 22px; }
+.item-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+#item-name { font-size: 20px; color: #1c2733; }
+#item-en { color: #6b7a89; font-size: 13px; }
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td { padding: 10px 12px; text-align: left; }
+thead tr { border-bottom: 1px solid #d3dde5; color: #6b7a89; font-size: 13px; }
+tbody tr { border-bottom: 1px solid #e4eaf0; }
+tbody tr:hover { background: #f2f7fb; }
+td.num, th.num { font-variant-numeric: tabular-nums; }
+td.price { color: #b07d1a; font-weight: 600; }
+td.rank-no { color: #8a97a5; }
+.history { margin-top: 32px; }
+.history-title { font-size: 13px; color: #6b7a89; margin-bottom: 6px; }
+#history-list { list-style: none; }
+#history-list li {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid #e4eaf0; font-size: 14px;
+}
+#history-list li:hover { background: #f2f7fb; }
+#history-list .h-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#history-list .h-price { color: #b07d1a; font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; margin-left: auto; }
+#history-list .h-time { color: #8a97a5; font-size: 12px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+
+/* ---- 场景测试界面 ---- */
+/* ---- 场景表格（示例样品） ---- */
+.scene-card {
+  background: #ffffff; border: 1px solid #e0e7ee; border-radius: 12px;
+  padding: 12px 14px 14px; box-shadow: 0 1px 3px rgba(16, 36, 56, .05);
+}
+.scene-table { width: 100%; border-collapse: collapse; }
+.scene-table th {
+  text-align: left; font-size: 13px; font-weight: 500; color: #6b7a89;
+  padding: 8px 8px; border-bottom: 1px solid #d3dde5;
+}
+.scene-table th:last-child { width: 56px; }
+.scene-table td { padding: 3px 4px; border-bottom: 1px solid #eef2f6; }
+.cell-input {
+  width: 100%; padding: 7px 6px; font-size: 14px; color: #2a3440;
+  border: 1px solid #dbe3ea; border-radius: 6px;
+  background: #fff; outline: none;
+}
+.cell-input:hover { border-color: #b9cadd; }
+.cell-input:focus { border-color: #3aa0d8; }
+.cell-input.gold-border { border-color: #b07d1a; }
+.cell-input.input-error { background: #ffe1de; border-color: #e26d5a; color: #d64541; }
+.cell-input[data-field="final"] { color: #b07d1a; font-weight: 600; }
+.cell-input[readonly] { background: #f6f8fa; }
+.row-del {
+  padding: 5px 10px; font-size: 13px; cursor: pointer;
+  color: #d64541; background: #fdeceb; border: none; border-radius: 6px;
+}
+.row-del:hover { background: #f9d7d5; }
+.add-row-btn {
+  width: 100%; padding: 8px;
+  font-size: 14px; color: #1d6fa5; cursor: pointer;
+  background: #eaf3fa; border: 1px dashed #b9cadd; border-radius: 8px;
+}
+.add-row-btn:hover { border-color: #3aa0d8; background: #dcecf8; }
+.profit-row td { padding: 10px 4px 4px; border-top: 2px solid #d3dde5; border-bottom: none; vertical-align: middle; }
+.profit-label-inner { display: flex; align-items: center; justify-content: space-between; }
+.time-group { display: flex; align-items: center; gap: 8px; }
+.time-label { font-size: 13px; color: #6b7a89; }
+.time-input {
+  width: 130px; padding: 5px 8px; font-size: 13px; color: #2a3440;
+  border: none; background: none;
+  text-align: center; outline: none;
+}
+.update-btn {
+  padding: 5px 14px; font-size: 13px; cursor: pointer;
+  color: #fff; background: #2b87c0; border: none; border-radius: 6px;
+}
+.update-btn:hover { background: #3aa0d8; }
+.profit-text { font-size: 15px; color: #1c2733; }
+#profit-value { color: #b07d1a; font-weight: 600; font-size: 15px; font-variant-numeric: tabular-nums; }
+
+/* ---- 弹窗 ---- */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(15, 25, 35, .35);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  background: #fff; border-radius: 12px; padding: 20px; width: 320px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .15);
+}
+.modal p { font-size: 15px; color: #1c2733; margin-bottom: 14px; }
+.modal input {
+  width: 100%; padding: 10px 12px; font-size: 14px; margin-bottom: 16px;
+  border: 1px solid #d3dde5; border-radius: 8px; outline: none;
+}
+.modal input:focus { border-color: #3aa0d8; }
+.modal-btns { display: flex; justify-content: flex-end; gap: 10px; }
+.modal-btns button {
+  padding: 8px 18px; font-size: 14px; cursor: pointer;
+  border: 1px solid #d3dde5; background: #fff; color: #2a3440; border-radius: 8px;
+}
+.modal-btns button:hover { border-color: #b9c6d2; }
+#modal-ok { background: #2b87c0; color: #fff; border: none; }
+#modal-ok:hover { background: #3aa0d8; }
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="brand"><span class="brand-dot"></span>WM 查询工具</div>
+  <button id="add-scene" class="add-btn">＋ 新增查询场景</button>
+  <div class="nav-section">置顶</div>
+  <div class="nav-item active" id="nav-query">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+    </svg>
+    物品查询
+  </div>
+  <div class="nav-section">查询场景</div>
+  <div id="scene-list"></div>
+  <div class="sidebar-foot">Warframe Market 工具</div>
+</aside>
+<div class="content">
+  <main class="panel">
+    <section id="view-query" class="view">
+      <h1>物品查询</h1>
+      <p class="sub">游戏中玩家在售 · 最低价前 5 个卖单</p>
+      <div class="search-box">
+        <input id="search" placeholder="输入物品名称，如：斩铁" autocomplete="off" spellcheck="false">
+        <button id="go">查询</button>
+        <ul id="suggest" class="suggest hidden"></ul>
+      </div>
+      <p class="hint" id="hint"></p>
+      <div id="status"></div>
+      <section id="result" class="hidden">
+        <div class="item-head">
+          <span id="item-name"></span>
+          <span id="item-en"></span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>#</th><th class="num">价格(白金)</th><th>玩家</th><th class="num">数量</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </section>
+      <section id="history" class="history hidden">
+        <p class="history-title">查询历史（点击重查，最多保留 10 条）</p>
+        <ul id="history-list"></ul>
+      </section>
+    </section>
+    <section id="view-scene" class="view hidden">
+      <h2 id="scene-title"></h2>
+      <p class="sub">表格数据暂不保存</p>
+      <div class="scene-card">
+        <table class="scene-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>掉率</th>
+              <th>自定义价格</th>
+              <th>wm查询价格</th>
+              <th>最终价格</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="scene-rows"></tbody>
+          <tfoot>
+            <tr class="add-row-tr">
+              <td colspan="6"><button id="add-row" class="add-row-btn">＋ 新增物品</button></td>
+            </tr>
+            <tr class="profit-row">
+              <td colspan="4" class="profit-label">
+                <div class="profit-label-inner">
+                  <span class="time-group">
+                    <span class="time-label">上次查询时间：</span>
+                    <input id="update-time" class="time-input" value="未查询" readonly>
+                    <button id="update-data" class="update-btn">更新数据</button>
+                  </span>
+                  <span class="profit-text">收益计算：</span>
+                </div>
+              </td>
+              <td><span id="profit-value">0</span></td>
+              <td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="modal-mask" class="modal-mask hidden">
+  <div class="modal">
+    <p id="modal-text">新增查询场景</p>
+    <input id="modal-input" maxlength="20" placeholder="输入场景名称（最多 20 字）">
+    <div class="modal-btns">
+      <button id="modal-cancel">取消</button>
+      <button id="modal-ok">确定</button>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const input = $('search'), goBtn = $('go'), suggest = $('suggest'),
+      hint = $('hint'), status = $('status'),
+      resultBox = $('result'), rows = $('rows');
+
+let names = [];    // 全部物品名（补全数据源）
+let current = [];  // 当前显示的候选
+let active = -1;   // 键盘选中的候选下标
+
+// ---- 加载补全数据 ----
+loadNames();
+loadHistory();
+loadScenes();
+
+async function loadNames() {
+  hint.textContent = '物品列表加载中…';
+  try {
+    const res = await fetch('/api/items');
+    names = await res.json();
+    hint.textContent = `物品列表已就绪（${names.length} 项），输入名称即可自动补全`;
+  } catch (e) {
+    hint.textContent = '物品列表加载失败，请刷新页面重试';
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ---- 侧边导航与查询场景 ----
+const addSceneBtn = $('add-scene'), sceneListBox = $('scene-list'),
+      navQuery = $('nav-query'), viewQuery = $('view-query'), viewScene = $('view-scene'),
+      sceneTitle = $('scene-title'),
+      modalMask = $('modal-mask'), modalText = $('modal-text'),
+      modalInput = $('modal-input'), modalOk = $('modal-ok'), modalCancel = $('modal-cancel');
+
+const SCENE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+  <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+  <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+  <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+  <rect x="14" y="14" width="7" height="7" rx="1.5"/>
+</svg>`;
+
+let scenes = [];          // 全部自定义场景
+let activeSceneId = null; // 当前选中的场景（null 表示在物品查询页）
+let modalMode = null;     // 'create' 或 'delete'
+let deleteTargetId = null;
+
+async function loadScenes() {
+  try {
+    const res = await fetch('/api/scenes');
+
+    if (!res.ok) throw new Error();
+
+    scenes = await res.json();
+    renderScenes();
+  } catch (e) {
+    // 接口不可用时只显示空场景列表
+    scenes = [];
+    renderScenes();
+  }
+}
+
+function renderScenes() {
+  sceneListBox.innerHTML = scenes.map(s =>
+    `<div class="nav-item scene-item${s.id === activeSceneId ? ' active' : ''}"
+          data-id="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}">
+       ${SCENE_ICON}
+       <span class="scene-name">${escapeHtml(s.name)}</span>
+       <span class="del-btn" data-del="${escapeHtml(s.id)}" title="删除该场景">×</span>
+     </div>`).join('');
+}
+
+function switchToQuery() {
+  activeSceneId = null;
+  viewQuery.classList.remove('hidden');
+  viewScene.classList.add('hidden');
+  navQuery.classList.add('active');
+  renderScenes();
+}
+
+function switchToScene(scene) {
+  activeSceneId = scene.id;
+  viewQuery.classList.add('hidden');
+  viewScene.classList.remove('hidden');
+  sceneTitle.textContent = scene.name;
+  navQuery.classList.remove('active');
+  renderScenes();
+}
+
+navQuery.addEventListener('click', switchToQuery);
+
+// ---- 场景拖动排序：按住约 250ms 后才进入拖动，避免单击误触 ----
+let dragState = null;      // { item, startY, started, moved, timer }
+let suppressSceneClick = false;
+const HOLD_MS = 250;       // 按住该时长后才触发拖动
+
+sceneListBox.addEventListener('mousedown', e => {
+  const item = e.target.closest('.scene-item');
+
+  // 删除按钮和右键不参与拖动
+  if (!item || e.target.closest('.del-btn') || e.button !== 0) return;
+
+  e.preventDefault();  // 防止拖动时选中文字
+  dragState = {
+    item,
+    startY: e.clientY,
+    started: false,
+    moved: false,
+    timer: setTimeout(() => {
+      if (!dragState) return;
+      dragState.started = true;
+      dragState.item.classList.add('dragging');
+      document.body.classList.add('scene-dragging');
+    }, HOLD_MS)
+  };
+});
+
+document.addEventListener('mousemove', e => {
+  if (!dragState) return;
+
+  // 还没进入拖动态时移动过多 -> 取消（当作普通单击）
+  if (!dragState.started) {
+    if (Math.abs(e.clientY - dragState.startY) > 6) {
+      clearTimeout(dragState.timer);
+      dragState = null;
+    }
+    return;
+  }
+
+  dragState.moved = true;
+
+  // 根据指针位置把拖动项实时插到目标项前/后
+  const items = [...sceneListBox.querySelectorAll('.scene-item')];
+  const over = items.find(el => {
+    const r = el.getBoundingClientRect();
+    return e.clientY >= r.top && e.clientY <= r.bottom;
+  });
+
+  if (!over || over === dragState.item) return;
+
+  const r = over.getBoundingClientRect();
+  const before = e.clientY < r.top + r.height / 2;
+  sceneListBox.insertBefore(dragState.item, before ? over : over.nextSibling);
+});
+
+document.addEventListener('mouseup', () => {
+  if (!dragState) return;
+
+  const { item, started, moved } = dragState;
+  clearTimeout(dragState.timer);
+  dragState = null;
+
+  item.classList.remove('dragging');
+  document.body.classList.remove('scene-dragging');
+
+  if (started && moved) {
+    persistSceneOrder();
+    suppressSceneClick = true;  // 拖动结束后的 click 不当作切换场景
+  }
+});
+
+function persistSceneOrder() {
+  const ids = [...sceneListBox.querySelectorAll('.scene-item')]
+    .map(el => el.dataset.id);
+
+  fetch('/api/scenes/order', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids })
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(data => {
+      if (data) {
+        scenes = data;
+        renderScenes();
+      }
+    })
+    .catch(() => { /* 排序保存失败不影响使用 */ });
+}
+
+sceneListBox.addEventListener('click', e => {
+  if (suppressSceneClick) {
+    suppressSceneClick = false;
+    return;
+  }
+  const del = e.target.closest('.del-btn');
+  if (del) {
+    e.stopPropagation();
+    const item = del.closest('.scene-item');
+    openModal('delete', { id: item.dataset.id, name: item.dataset.name });
+    return;
+  }
+  const item = e.target.closest('.scene-item');
+  if (item) switchToScene({ id: item.dataset.id, name: item.dataset.name });
+});
+
+// ---- 场景表格（UI样品：数据暂不持久化） ----
+const sceneRows = $('scene-rows'), addRowBtn = $('add-row'), profitValue = $('profit-value');
+
+function sceneRowHtml(name, rate) {
+  return `<tr>
+    <td><input class="cell-input" data-field="name" value="${escapeHtml(name)}"></td>
+    <td><input class="cell-input rate" data-field="rate" value="${escapeHtml(rate)}"></td>
+    <td><input class="cell-input num" data-field="custom" placeholder=""></td>
+    <td><input class="cell-input num" data-field="wm" placeholder=""></td>
+    <td><input class="cell-input num" data-field="final" readonly></td>
+    <td><button class="row-del">删除</button></td>
+  </tr>`;
+}
+
+function renderSceneRows() {
+  // 新页面只创建一行空行
+  sceneRows.innerHTML = sceneRowHtml('', '');
+  syncRowStates();
+  updateProfit();
+}
+
+function parseNum(v) {
+  const n = parseFloat(String(v).replace('%', ''));
+  return isNaN(n) ? 0 : n;
+}
+
+// 掉率接受两种格式：24.78% 和 0.2478（同一数值）；其他格式报错
+function parseRate(v) {
+  const text = String(v).trim();
+
+  if (text === '') return { ok: true, fraction: 0 };
+
+  const m = text.match(/^(\d+(?:\.\d+)?)\s*%$/);
+
+  if (m) return { ok: true, fraction: parseFloat(m[1]) / 100 };
+
+  if (/^\d+(?:\.\d+)?$/.test(text)) return { ok: true, fraction: parseFloat(text) };
+
+  return { ok: false, fraction: 0 };
+}
+
+// 联动规则：
+// - 最终价格 = 自定义价格有值取自定义价格，否则取 wm查询价格
+// - 自定义价格有值 -> wm查询价格只读且清空，自定义边框金色
+// - 自定义价格无值且 wm 有值 -> wm 边框金色
+// - 掉率格式非法 -> 红底报错
+function syncRowStates() {
+  sceneRows.querySelectorAll('tr').forEach(tr => {
+    const custom = tr.querySelector('[data-field="custom"]');
+    const wm = tr.querySelector('[data-field="wm"]');
+    const final = tr.querySelector('[data-field="final"]');
+    const rate = tr.querySelector('[data-field="rate"]');
+
+    const hasCustom = custom.value.trim() !== '';
+
+    wm.readOnly = hasCustom;
+    if (hasCustom && wm.value !== '') wm.value = '';
+
+    // 最终价格：自定义价格优先，其次 wm查询价格
+    final.value = hasCustom ? custom.value.trim() : wm.value.trim();
+
+    // 金色边框规则
+    custom.classList.toggle('gold-border', hasCustom);
+    wm.classList.toggle('gold-border', !hasCustom && wm.value.trim() !== '');
+
+    // 掉率格式校验
+    rate.classList.toggle('input-error', !parseRate(rate.value).ok);
+  });
+}
+
+// 收益 = Σ(掉率 × 最终价格)，输入变化时自动重算
+function updateProfit() {
+  let profit = 0;
+
+  sceneRows.querySelectorAll('tr').forEach(tr => {
+    const fraction = parseRate(tr.querySelector('[data-field="rate"]').value).fraction;
+    const final = parseNum(tr.querySelector('[data-field="final"]').value);
+    profit += fraction * final;
+  });
+
+  profitValue.textContent = profit.toFixed(2) + ' 白金';
+}
+
+sceneRows.addEventListener('click', e => {
+  if (e.target.closest('.row-del')) {
+    e.target.closest('tr').remove();
+    updateProfit();
+  }
+});
+
+sceneRows.addEventListener('input', () => {
+  syncRowStates();
+  updateProfit();
+});
+
+addRowBtn.addEventListener('click', () => {
+  sceneRows.insertAdjacentHTML('beforeend', sceneRowHtml('', ''));
+  syncRowStates();
+});
+
+renderSceneRows();
+
+// ---- 场景弹窗（新增命名 / 删除确认） ----
+function openModal(mode, scene) {
+  modalMode = mode;
+  if (mode === 'create') {
+    modalText.textContent = '新增查询场景';
+    modalInput.classList.remove('hidden');
+    modalInput.value = '';
+  } else {
+    modalText.textContent = `确定删除场景「${scene.name}」吗？`;
+    modalInput.classList.add('hidden');
+    deleteTargetId = scene.id;
+  }
+  modalMask.classList.remove('hidden');
+  if (mode === 'create') modalInput.focus();
+}
+
+function closeModal() {
+  modalMask.classList.add('hidden');
+  modalMode = null;
+  deleteTargetId = null;
+}
+
+addSceneBtn.addEventListener('click', () => openModal('create'));
+modalCancel.addEventListener('click', closeModal);
+modalMask.addEventListener('click', e => { if (e.target === modalMask) closeModal(); });
+modalInput.addEventListener('keydown', e => { if (e.key === 'Enter') modalOk.click(); });
+
+modalOk.addEventListener('click', async () => {
+  if (modalMode === 'create') {
+    const name = modalInput.value.trim();
+    if (!name) { modalInput.focus(); return; }
+
+    try {
+      const res = await fetch('/api/scenes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+
+      if (!res.ok) {
+        modalText.textContent = (await res.json()).error || '创建失败';
+        return;
+      }
+
+      const scene = await res.json();
+      await loadScenes();
+      switchToScene(scene);
+    } catch (e) {
+      modalText.textContent = '创建失败，请重试';
+      return;
+    }
+  } else if (modalMode === 'delete') {
+    const wasActive = activeSceneId === deleteTargetId;
+
+    try {
+      await fetch('/api/scenes/' + deleteTargetId, { method: 'DELETE' });
+      await loadScenes();
+      if (wasActive) switchToQuery();
+    } catch (e) { /* 删除失败时保持原状 */ }
+  }
+  closeModal();
+});
+
+// ---- 查询历史（服务端持久化） ----
+const historyBox = $('history'), historyList = $('history-list');
+
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function priceText(h) {
+  // 新格式：前5卖单的全部价格，如 8/8/8/10/10；数据不够显示现有的几个，没有则提示未查询到
+  if (Array.isArray(h.prices) && h.prices.length) return h.prices.join('/');
+  if (h.price != null) return String(h.price);  // 兼容只存最低价的旧格式
+  return '未查询到价格';
+}
+
+function renderHistory(list) {
+  historyBox.classList.toggle('hidden', !list.length);
+  historyList.innerHTML = list.map(h =>
+    `<li data-name="${escapeHtml(h.name)}">
+       <span class="h-name">${escapeHtml(h.name)}${h.need_count ? ' ×' + h.need_count + '个' : ''}</span>
+       <span class="h-price">${escapeHtml(priceText(h))}</span>
+       <span class="h-time">${fmtTime(h.time)}</span>
+     </li>`).join('');
+}
+
+historyList.addEventListener('click', e => {
+  const li = e.target.closest('li');
+  if (!li) return;
+  input.value = li.dataset.name;
+  query(li.dataset.name);
+});
+
+async function loadHistory() {
+  try {
+    const res = await fetch('/api/history');
+    if (res.ok) renderHistory(await res.json());
+  } catch (e) { /* 历史加载失败不影响查询 */ }
+}
+
+// ---- 自动补全 ----
+function highlight(name, q) {
+  // 不区分大小写地定位匹配位置，高亮时保留候选词原有的大小写
+  const i = name.toLowerCase().indexOf(q.toLowerCase());
+  if (i < 0) return escapeHtml(name);
+  return escapeHtml(name.slice(0, i)) + '<b>' + escapeHtml(name.slice(i, i + q.length)) + '</b>' +
+         escapeHtml(name.slice(i + q.length));
+}
+
+function renderSuggest() {
+  const q = input.value.trim().toLowerCase();
+  if (!q) { hide(); return; }
+
+  current = names.filter(n => n.toLowerCase().includes(q)).slice(0, 50);
+  active = -1;
+
+  if (!current.length) { hide(); return; }
+
+  suggest.innerHTML = current
+    .map(n => `<li>${highlight(n, q)}</li>`)
+    .join('');
+  suggest.classList.remove('hidden');
+}
+
+function hide() {
+  suggest.classList.add('hidden');
+  current = [];
+  active = -1;
+}
+
+function choose(i) {
+  if (i < 0 || i >= current.length) return;
+  input.value = current[i];
+  hide();
+  query(input.value);
+}
+
+input.addEventListener('input', renderSuggest);
+
+input.addEventListener('keydown', e => {
+  if (suggest.classList.contains('hidden')) {
+    if (e.key === 'Enter') query(input.value.trim());
+    return;
+  }
+
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    active = (active + step + current.length) % current.length;
+    [...suggest.children].forEach((li, i) => li.classList.toggle('active', i === active));
+    if (suggest.children[active]) {
+      suggest.children[active].scrollIntoView({ block: 'nearest' });
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    choose(active >= 0 ? active : 0);
+  } else if (e.key === 'Escape') {
+    hide();
+  }
+});
+
+// 用 mousedown 保证在失去焦点前触发
+suggest.addEventListener('mousedown', e => {
+  const li = e.target.closest('li');
+  const index = [...suggest.children].indexOf(li);
+  if (index >= 0) { e.preventDefault(); choose(index); }
+});
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('.search-box')) hide();
+});
+
+// ---- 查询 ----
+goBtn.addEventListener('click', () => { hide(); query(input.value.trim()); });
+
+status.addEventListener('click', e => {
+  const link = e.target.closest('.sug');
+  if (link) { input.value = link.textContent; query(link.textContent); }
+});
+
+async function query(name) {
+  if (!name) return;
+
+  status.classList.remove('error');
+  status.textContent = '查询中…';
+  goBtn.disabled = true;
+  resultBox.classList.add('hidden');
+
+  try {
+    const res = await fetch('/api/query?name=' + encodeURIComponent(name));
+    const data = await res.json();
+
+    if (!res.ok) {
+      status.innerHTML = escapeHtml(data.error || '查询失败');
+
+      if (data.suggestions && data.suggestions.length) {
+        status.innerHTML += '，你是不是想找：' + data.suggestions
+          .map(s => `<span class="sug">${escapeHtml(s)}</span>`)
+          .join('、');
+      }
+      return;
+    }
+
+    status.textContent = '';
+    // 赋能类在名称后显示升满级所需数量（如 ×21个）
+    var displayName = data.item.name;
+
+    if (data.item.need_count) {
+      displayName += ' ×' + data.item.need_count + '个';
+    }
+
+    $('item-name').textContent = displayName;
+    $('item-en').textContent = data.item.name_en + ' · ' + data.item.slug;
+
+    rows.innerHTML = data.orders.length
+      ? data.orders.map((o, i) =>
+          `<tr>
+             <td class="rank-no">${i + 1}</td>
+             <td class="num price">${o.platinum}</td>
+             <td>${escapeHtml(o.player)}</td>
+             <td class="num">${o.quantity}</td>
+           </tr>`).join('')
+      : `<tr><td colspan="4" style="color:#6b7a89">没有符合条件的卖单</td></tr>`;
+
+    resultBox.classList.remove('hidden');
+
+    if (data.history) renderHistory(data.history);
+  } catch (e) {
+    status.textContent = '网络请求失败，请稍后重试';
+    status.classList.add('error');
+  } finally {
+    goBtn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>
