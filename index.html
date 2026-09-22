@@ -190,10 +190,10 @@ td.rank-no { color: #8a97a5; }
 }
 .profit-row.run-time-row { border-top: none; padding-top: 10px; margin-top: 0; }
 #ppm-value, #pph-value { color: #b07d1a; font-weight: 600; font-variant-numeric: tabular-nums; }
-/* 单局时间可输入，加边框与普通输入框一致 */
-#run-time { border: 1px solid #dbe3ea; border-radius: 6px; background: #fff; }
-#run-time:hover { border-color: #b9cadd; }
-#run-time:focus { border-color: #3aa0d8; outline: none; }
+/* 单局时间和掉落倍率可输入，加边框与普通输入框一致 */
+#run-time, #drop-multiplier { border: 1px solid #dbe3ea; border-radius: 6px; background: #fff; }
+#run-time:hover, #drop-multiplier:hover { border-color: #b9cadd; }
+#run-time:focus, #drop-multiplier:focus { border-color: #3aa0d8; outline: none; }
 .profit-row .time-label, .profit-row .profit-text { white-space: nowrap; }
 .time-group { display: flex; align-items: center; gap: 8px; }
 .time-label { font-size: 13px; color: #6b7a89; }
@@ -330,6 +330,8 @@ td.rank-no { color: #8a97a5; }
           <span class="time-group">
             <span class="time-label">单局时间(分钟)：</span>
             <input id="run-time" class="time-input" placeholder="如 3.5" autocomplete="off">
+            <span class="time-label">掉落倍率：</span>
+            <input id="drop-multiplier" class="time-input" placeholder="如 2" autocomplete="off">
           </span>
           <span class="profit-text">白金/分钟：<span id="ppm-value">-</span>　白金/小时：<span id="pph-value">-</span></span>
         </div>
@@ -450,7 +452,7 @@ async function switchToScene(scene) {
     if (!res.ok) throw new Error();
     sceneData = await res.json();
   } catch (e) {
-    sceneData = { id: scene.id, name: scene.name, elements: [], update_time: null, run_time: null };
+    sceneData = { id: scene.id, name: scene.name, elements: [], update_time: null, run_time: null, drop_multiplier: null };
   }
   renderSceneRows();
 }
@@ -584,8 +586,9 @@ function renderSceneRows() {
   sceneRows.innerHTML = elements.map(el =>
     sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.wm || '')).join('');
 
-  // 回填单局时间并重算收益
+  // 回填单局时间、掉落倍率并重算收益
   runTimeInput.value = (sceneData && sceneData.run_time) ? sceneData.run_time : '';
+  dropMultInput.value = (sceneData && sceneData.drop_multiplier) ? sceneData.drop_multiplier : '';
 
   syncRowStates();
   updateProfit();
@@ -611,6 +614,7 @@ async function saveScene(extra = {}) {
     elements: collectRows(),
     update_time: sceneData.update_time || null,
     run_time: sceneData.run_time || null,
+    drop_multiplier: sceneData.drop_multiplier || null,
   }, extra);
 
   try {
@@ -735,15 +739,22 @@ function updateProfit() {
   updateEarnings(profit);
 }
 
-// 按单局时间（分钟）折算白金/分钟和白金/小时
-const runTimeInput = $('run-time');
+// 按单局时间（分钟）和掉落倍率折算白金/分钟和白金/小时
+const runTimeInput = $('run-time'), dropMultInput = $('drop-multiplier');
+
+// 掉落倍率为空或无效时按 1 计算
+function getDropMultiplier() {
+  const v = parseFloat(dropMultInput.value);
+  return (!isNaN(v) && v > 0) ? v : 1;
+}
 
 function updateEarnings(profit) {
   const minutes = parseFloat(runTimeInput.value);
 
   if (!isNaN(minutes) && minutes > 0) {
-    $('ppm-value').textContent = (profit / minutes).toFixed(2);
-    $('pph-value').textContent = (profit / minutes * 60).toFixed(2);
+    const earned = profit * getDropMultiplier();
+    $('ppm-value').textContent = (earned / minutes).toFixed(2);
+    $('pph-value').textContent = (earned / minutes * 60).toFixed(2);
   } else {
     $('ppm-value').textContent = '-';
     $('pph-value').textContent = '-';
@@ -758,6 +769,20 @@ runTimeInput.addEventListener('input', () => {
     sceneData.run_time = minutes;
   } else {
     sceneData.run_time = null;
+  }
+
+  updateProfit();
+  scheduleSceneSave();
+});
+
+// 掉落倍率输入：重算收益并持久化到场景 json
+dropMultInput.addEventListener('input', () => {
+  const mult = parseFloat(dropMultInput.value);
+
+  if (!isNaN(mult) && mult > 0) {
+    sceneData.drop_multiplier = mult;
+  } else {
+    sceneData.drop_multiplier = null;
   }
 
   updateProfit();
@@ -796,6 +821,58 @@ sceneRows.addEventListener('focusin', e => {
     hideCellSuggest();
   }
 });
+
+// 名称列粘贴多行“名称 掉率”文本（如从 Wiki 复制的掉落表）时自动逐行填充，
+// 当前行不够时自动新增行；单行内容仍走默认粘贴
+sceneRows.addEventListener('paste', e => {
+  const target = e.target;
+
+  if (!target.dataset || target.dataset.field !== 'name') return;
+
+  const text = (e.clipboardData || window.clipboardData).getData('text');
+
+  if (!text) return;
+
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+
+  if (lines.length < 2) return;
+
+  e.preventDefault();
+
+  let tr = target.closest('tr');
+
+  lines.forEach(line => {
+    // 当前 tr 填完就顺着往下用，用完了自动补新行
+    if (!tr) {
+      sceneRows.insertAdjacentHTML('beforeend', sceneRowHtml('', '', '', ''));
+      tr = sceneRows.lastElementChild;
+    }
+
+    const parsed = parsePastedLine(line);
+
+    tr.querySelector('[data-field="name"]').value = parsed.name;
+    tr.querySelector('[data-field="rate"]').value = parsed.rate;
+
+    tr = tr.nextElementSibling;
+  });
+
+  hideCellSuggest();
+  syncRowStates();
+  updateProfit();
+  scheduleSceneSave();
+});
+
+// 解析一行“名称 掉率”：末尾是数字或百分数时识别为掉率，其余为物品名
+// （物品名本身可含空格，如“镀层 斩铁 24.78%”）
+function parsePastedLine(line) {
+  const m = line.match(/^(.*\S)\s+(\S+)$/);
+
+  if (m && (/^\d+(?:\.\d+)?%$/.test(m[2]) || /^\d*\.?\d+$/.test(m[2]))) {
+    return { name: m[1], rate: m[2] };
+  }
+
+  return { name: line, rate: '' };
+}
 
 // 名称列补全的键盘操作：上下选择、回车填入、Esc 收起
 sceneRows.addEventListener('keydown', e => {

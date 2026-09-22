@@ -399,9 +399,17 @@ def api_scenes_create():
         return jsonify({"error": f"场景「{name}」已存在"}), 409
 
     with open(scene_path, "w", encoding="utf-8") as f:
-        # elements 存表格行，update_time 存上次查询时间，run_time 存单局时间（分钟），均在场景页保存
+        # elements 存表格行，update_time 存上次查询时间，run_time 存单局时间（分钟），
+        # drop_multiplier 存掉落倍率，均在场景页保存
         json.dump(
-            {"id": scene_id, "name": name, "elements": [], "update_time": None, "run_time": None},
+            {
+                "id": scene_id,
+                "name": name,
+                "elements": [],
+                "update_time": None,
+                "run_time": None,
+                "drop_multiplier": None,
+            },
             f,
             ensure_ascii=False
         )
@@ -476,6 +484,7 @@ def api_scene_get(scene_id):
         "elements": data.get("elements", []),
         "update_time": data.get("update_time"),
         "run_time": data.get("run_time"),
+        "drop_multiplier": data.get("drop_multiplier"),
     })
 
 
@@ -547,6 +556,17 @@ def api_scene_save(scene_id):
         else:
             return jsonify({"error": "无效的单局时间"}), 400
 
+    if "drop_multiplier" in body:
+        drop_multiplier = body["drop_multiplier"]
+
+        # 掉落倍率：数字或空，0 及负数视为无效，空值计算时按 1
+        if drop_multiplier is None:
+            data["drop_multiplier"] = None
+        elif isinstance(drop_multiplier, (int, float)) and drop_multiplier > 0:
+            data["drop_multiplier"] = drop_multiplier
+        else:
+            return jsonify({"error": "无效的掉落倍率"}), 400
+
     try:
         if new_id != scene_id:
             os.replace(
@@ -570,6 +590,7 @@ def api_scene_save(scene_id):
         "elements": data.get("elements", []),
         "update_time": data.get("update_time"),
         "run_time": data.get("run_time"),
+        "drop_multiplier": data.get("drop_multiplier"),
     })
 
 
