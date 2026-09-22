@@ -13,6 +13,8 @@ import webbrowser
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://api.warframe.market/v2"
 
@@ -23,9 +25,34 @@ HEADERS = {
     "Crossplay": "true"
 }
 
+
+def make_session():
+    """创建带自动重试的请求会话：连接被重置等瞬时网络错误会自动重试 3 次"""
+
+    session = requests.Session()
+
+    retry = Retry(
+        total=3,
+        backoff_factor=0.5,  # 重试间隔 0.5s, 1s, 2s
+        status_forcelist=(429, 500, 502, 503, 504),
+    )
+
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    return session
+
+
+SESSION = make_session()
+
 # 物品列表本地缓存（存在脚本同目录）
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "items_cache.json")
 CACHE_TTL_HOURS = 24  # 缓存有效时长（小时），超过后自动重新下载
+
+# 查询历史（存在脚本同目录，随程序重启持久保留）
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "query_history.json")
+HISTORY_MAX = 10  # 最多保留条数
 
 # 启动后加载的数据（供补全和查找使用）
 ITEMS = []
@@ -99,7 +126,7 @@ def get_all_items():
     url = f"{BASE_URL}/items"
 
     try:
-        response = requests.get(
+        response = SESSION.get(
             url,
             headers=HEADERS,
             timeout=10
@@ -144,7 +171,7 @@ def get_orders(item_slug):
 
     url = f"{BASE_URL}/orders/item/{item_slug}"
 
-    response = requests.get(
+    response = SESSION.get(
         url,
         headers=HEADERS,
         timeout=10
@@ -155,11 +182,53 @@ def get_orders(item_slug):
     return response.json()["data"]
 
 
+def load_history():
+    """读取查询历史，文件不存在或损坏时返回空列表"""
+
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+
+        if isinstance(history, list):
+            return [h for h in history if isinstance(h, dict) and "name" in h]
+
+    except (OSError, ValueError):
+        pass  # 文件损坏时当作没有历史
+
+    return []
+
+
+def add_history(name, prices=None):
+    """记录一次查询：同名条目移到最前并更新时间和全部价格，最多保留 HISTORY_MAX 条
+
+    :param prices: 查询结果中前5卖单的白金价格列表（低到高），没有卖单时为空列表
+    """
+
+    history = [h for h in load_history() if h.get("name") != name]
+    history.insert(0, {"name": name, "time": time.time(), "prices": prices or []})
+    history = history[:HISTORY_MAX]
+
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+    except OSError:
+        pass  # 历史写失败不影响查询结果
+
+    return history
+
+
 @app.route("/")
 def index():
     """查询页面"""
 
     return send_from_directory(WEB_DIR, "index.html")
+
+
+@app.route("/api/history")
+def api_history():
+    """查询历史"""
+
+    return jsonify(load_history())
 
 
 @app.route("/api/items")
@@ -189,7 +258,13 @@ def api_query():
             "suggestions": suggestions
         }), 404
 
-    orders = get_orders(item["slug"])
+    try:
+        orders = get_orders(item["slug"])
+    except requests.RequestException:
+        # 网络异常（含自动重试后仍失败）：返回明确错误，而不是 500 崩掉
+        return jsonify({
+            "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
+        }), 502
 
     # 只看游戏中玩家的0级卖单
     filtered = []
@@ -219,6 +294,12 @@ def api_query():
         for order in filtered[:5]
     ]
 
+    # 记录查询历史（只在查询成功时记录，保存前5卖单的全部价格）
+    history = add_history(
+        item["i18n"]["zh-hans"]["name"],
+        [order["platinum"] for order in top5]
+    )
+
     return jsonify({
         "item": {
             "name": item["i18n"]["zh-hans"]["name"],
@@ -226,6 +307,7 @@ def api_query():
             "slug": item["slug"],
         },
         "orders": top5,
+        "history": history,
     })
 
 
@@ -257,7 +339,12 @@ def main():
 
     print("正在加载物品列表...")
 
-    ITEMS = get_all_items()
+    try:
+        ITEMS = get_all_items()
+    except requests.RequestException:
+        print("Warframe Market 连接失败，且没有可用的本地缓存")
+        print("请检查网络后重新运行")
+        sys.exit(1)
 
     # 去重，保持原有顺序
     NAME_LIST = list(dict.fromkeys(
