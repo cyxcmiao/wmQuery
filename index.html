@@ -146,7 +146,6 @@ td.rank-no { color: #8a97a5; }
 .scene-card {
   background: #ffffff; border: 1px solid #e0e7ee; border-radius: 12px;
   padding: 12px 14px 14px; box-shadow: 0 1px 3px rgba(16, 36, 56, .05);
-  overflow-x: auto;  /* 窗口过窄时表格横向滚动，不挤压单元格 */
 }
 .scene-table { width: 100%; border-collapse: collapse; }
 .scene-table th {
@@ -155,17 +154,14 @@ td.rank-no { color: #8a97a5; }
   white-space: nowrap;
 }
 .scene-table th:last-child { width: 64px; }
+/* 名称列加宽：约为自适应时的2倍 */
+.scene-table th:first-child { width: 23%; }
 .scene-table td { padding: 3px 4px; border-bottom: 1px solid #eef2f6; }
 .cell-input {
   width: 100%; padding: 7px 6px; font-size: 14px; color: #2a3440;
   border: 1px solid #dbe3ea; border-radius: 6px;
   background: #fff; outline: none;
 }
-/* 各列最小宽度：保证价格内容完整显示，窗口不够宽时表格整体横向滚动 */
-.cell-input[data-field="name"] { min-width: 150px; }
-.cell-input[data-field="rate"] { min-width: 90px; }
-.cell-input[data-field="custom"] { min-width: 100px; }
-.cell-input[data-field="wm"], .cell-input[data-field="final"] { min-width: 190px; }
 .cell-input:hover { border-color: #b9cadd; }
 .cell-input:focus { border-color: #3aa0d8; }
 .cell-input.gold-border { border-color: #b07d1a; }
@@ -190,7 +186,7 @@ td.rank-no { color: #8a97a5; }
 }
 .profit-row.run-time-row { border-top: none; padding-top: 10px; margin-top: 0; }
 #ppm-value, #pph-value { color: #b07d1a; font-weight: 600; font-variant-numeric: tabular-nums; }
-/* 单局时间和掉落倍率可输入，加边框与普通输入框一致 */
+/* 单局时间、掉落倍率可输入，加边框与普通输入框一致 */
 #run-time, #drop-multiplier { border: 1px solid #dbe3ea; border-radius: 6px; background: #fff; }
 #run-time:hover, #drop-multiplier:hover { border-color: #b9cadd; }
 #run-time:focus, #drop-multiplier:focus { border-color: #3aa0d8; outline: none; }
@@ -304,16 +300,18 @@ td.rank-no { color: #8a97a5; }
             <tr>
               <th>名称</th>
               <th>掉率</th>
+              <th>声望</th>
               <th>自定义价格</th>
               <th>wm查询价格</th>
-              <th>最终价格</th>
+              <th>期望价格</th>
+              <th>白金/十万声望</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="scene-rows"></tbody>
           <tfoot>
             <tr class="add-row-tr">
-              <td colspan="6"><button id="add-row" class="add-row-btn">＋ 新增物品</button></td>
+              <td colspan="8"><button id="add-row" class="add-row-btn">＋ 新增物品</button></td>
             </tr>
           </tfoot>
         </table>
@@ -567,13 +565,15 @@ sceneListBox.addEventListener('click', e => {
 // ---- 场景表格（数据持久化到该场景的 json 文件） ----
 const sceneRows = $('scene-rows'), addRowBtn = $('add-row'), profitValue = $('profit-value');
 
-function sceneRowHtml(name, rate, custom, wm) {
+function sceneRowHtml(name, rate, custom, wm, standing) {
   return `<tr>
     <td><input class="cell-input" data-field="name" value="${escapeHtml(name)}" autocomplete="off" spellcheck="false"></td>
     <td><input class="cell-input rate" data-field="rate" value="${escapeHtml(rate)}"></td>
+    <td class="col-standing"><input class="cell-input num" data-field="standing" value="${escapeHtml(standing || '')}"></td>
     <td><input class="cell-input num" data-field="custom" value="${escapeHtml(custom)}"></td>
     <td><input class="cell-input num" data-field="wm" value="${escapeHtml(wm)}" placeholder=""></td>
     <td><input class="cell-input num" data-field="final" readonly></td>
+    <td class="col-ptm"><input class="cell-input num" data-field="ptm" readonly></td>
     <td><button class="row-del">删除</button></td>
   </tr>`;
 }
@@ -584,7 +584,7 @@ function renderSceneRows() {
     ? sceneData.elements : [{}];
 
   sceneRows.innerHTML = elements.map(el =>
-    sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.wm || '')).join('');
+    sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.wm || '', el.standing)).join('');
 
   // 回填单局时间、掉落倍率并重算收益
   runTimeInput.value = (sceneData && sceneData.run_time) ? sceneData.run_time : '';
@@ -602,6 +602,7 @@ function collectRows() {
   return [...sceneRows.querySelectorAll('tr')].map(tr => ({
     name: tr.querySelector('[data-field="name"]').value.trim(),
     rate: tr.querySelector('[data-field="rate"]').value.trim(),
+    standing: tr.querySelector('[data-field="standing"]').value.trim(),
     custom: tr.querySelector('[data-field="custom"]').value.trim(),
     wm: tr.querySelector('[data-field="wm"]').value.trim(),
   }));
@@ -697,24 +698,43 @@ function parseRate(v) {
 }
 
 // 联动规则：
-// - 最终价格 = 自定义价格有值取自定义价格，否则取 wm查询价格
+// - 期望价格 = 掉率 × 价格（自定义价格优先，自定义价格为空取 wm查询价格）
+// - 掉率缺失或格式错误时期望价格按 0 计；期望价格只显示数字，不显示括号
 // - 自定义价格有值 -> wm查询价格只读并置灰，但保留已有内容；自定义边框金色
 // - 自定义价格无值且 wm 有值 -> wm 边框金色
 // - 掉率格式非法 -> 红底报错
+// - 声望留空 -> 该行白金/十万声望不计算（显示空）；非正数或非数字 -> 红底报错
 function syncRowStates() {
   sceneRows.querySelectorAll('tr').forEach(tr => {
     const custom = tr.querySelector('[data-field="custom"]');
     const wm = tr.querySelector('[data-field="wm"]');
     const final = tr.querySelector('[data-field="final"]');
     const rate = tr.querySelector('[data-field="rate"]');
+    const standing = tr.querySelector('[data-field="standing"]');
+    const ptm = tr.querySelector('[data-field="ptm"]');
 
     const hasCustom = custom.value.trim() !== '';
 
     wm.readOnly = hasCustom;
 
-    // 最终价格：自定义价格优先，其次 wm查询价格
-    // wm 值为「9（8/9/10）」这类格式时 parseFloat 取均值，「价格数据过少」等文字按 0 计
-    final.value = hasCustom ? custom.value.trim() : wm.value.trim();
+    // 价格：自定义价格优先，其次 wm查询价格
+    // wm 值为「9（8/9/10）」这类格式时 parseFloat 取外层数值（即平均值），「价格数据过少」等文字按 0 计
+    const price = hasCustom ? parseNum(custom.value.trim()) : parseNum(wm.value.trim());
+
+    // 期望价格 = 掉率 × 价格，掉率缺失按 0
+    final.value = (parseRate(rate.value).fraction * price).toFixed(2);
+
+    // 白金/十万声望 = 价格（不含掉率）/ 声望 × 100000，声望留空则该行不计算
+    const stNum = parseFloat(standing.value);
+
+    if (standing.value.trim() !== '' && !isNaN(stNum) && stNum > 0) {
+      ptm.value = (price / stNum * 100000).toFixed(2);
+      standing.classList.remove('input-error');
+    } else {
+      ptm.value = '';
+      // 留空合法；填了但不是正数才报错
+      standing.classList.toggle('input-error', standing.value.trim() !== '');
+    }
 
     // 金色边框规则
     custom.classList.toggle('gold-border', hasCustom);
@@ -725,14 +745,12 @@ function syncRowStates() {
   });
 }
 
-// 收益 = Σ(掉率 × 最终价格)，输入变化时自动重算
+// 收益 = Σ期望价格（期望价格已含掉率），与声望无关
 function updateProfit() {
   let profit = 0;
 
   sceneRows.querySelectorAll('tr').forEach(tr => {
-    const fraction = parseRate(tr.querySelector('[data-field="rate"]').value).fraction;
-    const final = parseNum(tr.querySelector('[data-field="final"]').value);
-    profit += fraction * final;
+    profit += parseNum(tr.querySelector('[data-field="final"]').value);
   });
 
   profitValue.textContent = profit.toFixed(2) + ' 白金';

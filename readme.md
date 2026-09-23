@@ -6,7 +6,7 @@
 - cache文件夹：
   - query_history.json：查询历史记录。
   - scene_xxx.json：场景缓存文件。每个场景对应一个文件。
-- build_exe.bat：打包脚本，双击运行，可执行文件在dist文件夹下wmQuery.exe。每次更新重跑脚本即可。
+- build_exe.bat：打包脚本，双击运行，可执行文件在dist文件夹下wmQuery.exe。每次更新重跑脚本即可。（打包脚本可能有问题，不想管了）
 
 # 使用方式
 1. 程序会生成json文件和cache文件夹，最好放在独立的文件夹下运行。

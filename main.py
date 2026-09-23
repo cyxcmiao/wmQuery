@@ -399,7 +399,7 @@ def api_scenes_create():
         return jsonify({"error": f"场景「{name}」已存在"}), 409
 
     with open(scene_path, "w", encoding="utf-8") as f:
-        # elements 存表格行，update_time 存上次查询时间，run_time 存单局时间（分钟），
+        # elements 存表格行，update_time 存上次查询时间，run_time 存单局时间，
         # drop_multiplier 存掉落倍率，均在场景页保存
         json.dump(
             {
@@ -531,6 +531,7 @@ def api_scene_save(scene_id):
             clean.append({
                 "name": str(row.get("name", "")).strip()[:100],
                 "rate": str(row.get("rate", "")).strip()[:20],
+                "standing": str(row.get("standing", "")).strip()[:20],
                 "custom": str(row.get("custom", "")).strip()[:20],
                 "wm": str(row.get("wm", "")).strip()[:20],
             })
