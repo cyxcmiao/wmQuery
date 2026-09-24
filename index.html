@@ -156,6 +156,10 @@ td.rank-no { color: #8a97a5; }
 .scene-table th:last-child { width: 64px; }
 /* 名称列加宽：约为自适应时的2倍 */
 .scene-table th:first-child { width: 23%; }
+/* 可排序表头（期望价格、白金/十万声望） */
+.scene-table th.sortable { cursor: pointer; user-select: none; }
+.scene-table th.sortable:hover { color: #1d6fa5; }
+.sort-arrow { font-size: 10px; margin-left: 2px; }
 .scene-table td { padding: 3px 4px; border-bottom: 1px solid #eef2f6; }
 .cell-input {
   width: 100%; padding: 7px 6px; font-size: 14px; color: #2a3440;
@@ -220,6 +224,16 @@ td.rank-no { color: #8a97a5; }
 
 /* 场景表格名称列的补全下拉（固定定位跟随单元格） */
 .suggest.cell-suggest { position: fixed; z-index: 60; }
+
+/* 重复物品提示条 */
+#dup-toast {
+  position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 200;
+  background: #fff4e5; color: #a06a00; border: 1px solid #f0d9b5;
+  padding: 8px 16px; border-radius: 8px; font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
+  opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+#dup-toast.show { opacity: 1; }
 
 /* ---- 弹窗 ---- */
 .modal-mask {
@@ -303,8 +317,8 @@ td.rank-no { color: #8a97a5; }
               <th>声望</th>
               <th>自定义价格</th>
               <th>wm查询价格</th>
-              <th>期望价格</th>
-              <th>白金/十万声望</th>
+              <th class="sortable" data-sort="final">期望价格<span class="sort-arrow"></span></th>
+              <th class="sortable" data-sort="ptm">白金/十万声望<span class="sort-arrow"></span></th>
               <th></th>
             </tr>
           </thead>
@@ -347,6 +361,7 @@ td.rank-no { color: #8a97a5; }
     </div>
   </div>
 </div>
+<div id="dup-toast"></div>
 <script>
 const $ = id => document.getElementById(id);
 const input = $('search'), goBtn = $('go'), suggest = $('suggest'),
@@ -565,6 +580,33 @@ sceneListBox.addEventListener('click', e => {
 // ---- 场景表格（数据持久化到该场景的 json 文件） ----
 const sceneRows = $('scene-rows'), addRowBtn = $('add-row'), profitValue = $('profit-value');
 
+// 行元数据：默认顺序号（排序恢复用）、名称输入的上一个值（重复检测回退用）
+let origSeq = 0;
+
+function markRowMeta(tr) {
+  tr.dataset.orig = ++origSeq;
+  const name = tr.querySelector('[data-field="name"]');
+  if (name) name.dataset.prev = name.value;
+}
+
+// 名称列重复检测：name 与其他行的名称相同则视为重复
+function nameIsDuplicate(inputEl, name) {
+  if (!name) return false;
+  return [...sceneRows.querySelectorAll('[data-field="name"]')]
+    .some(el => el !== inputEl && el.value.trim() === name);
+}
+
+// 重复物品提示条
+let dupToastTimer = null;
+
+function showDupToast(text) {
+  const toast = $('dup-toast');
+  toast.textContent = text;
+  toast.classList.add('show');
+  clearTimeout(dupToastTimer);
+  dupToastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
+}
+
 function sceneRowHtml(name, rate, custom, wm, standing) {
   return `<tr>
     <td><input class="cell-input" data-field="name" value="${escapeHtml(name)}" autocomplete="off" spellcheck="false"></td>
@@ -585,6 +627,10 @@ function renderSceneRows() {
 
   sceneRows.innerHTML = elements.map(el =>
     sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.wm || '', el.standing)).join('');
+
+  // 重置默认顺序号并记录每行名称的初始值
+  origSeq = 0;
+  sceneRows.querySelectorAll('tr').forEach(tr => markRowMeta(tr));
 
   // 回填单局时间、掉落倍率并重算收益
   runTimeInput.value = (sceneData && sceneData.run_time) ? sceneData.run_time : '';
@@ -817,6 +863,18 @@ sceneRows.addEventListener('click', e => {
 });
 
 sceneRows.addEventListener('input', e => {
+  // 名称列重复检测：与其他行重名时取消本次输入并提示
+  if (e.target.dataset && e.target.dataset.field === 'name') {
+    const name = e.target.value.trim();
+
+    if (name && nameIsDuplicate(e.target, name)) {
+      e.target.value = e.target.dataset.prev || '';
+      showDupToast(`已取消输入：「${name}」在表格中已存在`);
+    } else {
+      e.target.dataset.prev = e.target.value;
+    }
+  }
+
   syncRowStates();
   updateProfit();
   scheduleSceneSave();
@@ -833,6 +891,7 @@ sceneRows.addEventListener('input', e => {
 // 焦点进入名称列时也提供补全（已有内容可继续修改）
 sceneRows.addEventListener('focusin', e => {
   if (e.target.dataset && e.target.dataset.field === 'name') {
+    e.target.dataset.prev = e.target.value;  // 记录输入前的值，重复时回退
     cellInput = e.target;
     renderCellSuggest();
   } else if (cellInput) {
@@ -858,23 +917,38 @@ sceneRows.addEventListener('paste', e => {
   e.preventDefault();
 
   let tr = target.closest('tr');
+  let skipped = 0;
 
   lines.forEach(line => {
     // 当前 tr 填完就顺着往下用，用完了自动补新行
     if (!tr) {
       sceneRows.insertAdjacentHTML('beforeend', sceneRowHtml('', '', '', ''));
       tr = sceneRows.lastElementChild;
+      markRowMeta(tr);
     }
 
     const parsed = parsePastedLine(line);
+    const nameInput = tr.querySelector('[data-field="name"]');
+    const nm = parsed.name.trim();
 
-    tr.querySelector('[data-field="name"]').value = parsed.name;
+    // 与其他行重名的物品跳过，该行顺延给下一行内容
+    if (nm && nameIsDuplicate(nameInput, nm)) {
+      skipped++;
+      tr = tr.nextElementSibling;
+      return;
+    }
+
+    nameInput.value = parsed.name;
+    nameInput.dataset.prev = parsed.name;
     tr.querySelector('[data-field="rate"]').value = parsed.rate;
 
     tr = tr.nextElementSibling;
   });
 
   hideCellSuggest();
+
+  if (skipped) showDupToast(`多行填充已跳过 ${skipped} 个重复物品`);
+
   syncRowStates();
   updateProfit();
   scheduleSceneSave();
@@ -906,7 +980,18 @@ sceneRows.addEventListener('keydown', e => {
     }
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (cellActive >= 0 && cellCurrent[cellActive]) cellInput.value = cellCurrent[cellActive];
+    if (cellActive >= 0 && cellCurrent[cellActive]) {
+      const picked = cellCurrent[cellActive];
+      cellInput.value = picked;
+
+      // 补全填入的物品与其他行重名时取消填入
+      if (nameIsDuplicate(cellInput, picked.trim())) {
+        cellInput.value = cellInput.dataset.prev || '';
+        showDupToast(`已取消输入：「${picked}」在表格中已存在`);
+      } else {
+        cellInput.dataset.prev = cellInput.value;
+      }
+    }
     hideCellSuggest();
     syncRowStates();
     updateProfit();
@@ -918,9 +1003,59 @@ sceneRows.addEventListener('keydown', e => {
 
 addRowBtn.addEventListener('click', () => {
   sceneRows.insertAdjacentHTML('beforeend', sceneRowHtml('', '', '', ''));
+  markRowMeta(sceneRows.lastElementChild);
   syncRowStates();
   scheduleSceneSave();
 });
+
+// ---- 期望价格、白金/十万声望列排序：单击循环 默认 -> 正序 -> 倒序 ----
+let sceneSort = null;  // null 为默认顺序，否则 { key, dir: 1|-1 }
+
+document.querySelectorAll('.scene-table th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+
+    if (!sceneSort || sceneSort.key !== key) {
+      sceneSort = { key, dir: 1 };   // 第一次点击：正序
+    } else if (sceneSort.dir === 1) {
+      sceneSort.dir = -1;            // 第二次点击：倒序
+    } else {
+      sceneSort = null;              // 第三次点击：恢复默认顺序
+    }
+
+    applySceneSort();
+  });
+});
+
+function applySceneSort() {
+  // 表头箭头指示当前排序
+  document.querySelectorAll('.scene-table th.sortable').forEach(th => {
+    const active = sceneSort && sceneSort.key === th.dataset.sort;
+    th.querySelector('.sort-arrow').textContent = active ? (sceneSort.dir === 1 ? '▲' : '▼') : '';
+  });
+
+  const trs = [...sceneRows.querySelectorAll('tr')];
+
+  if (!sceneSort) {
+    // 默认顺序 = 行创建时的顺序
+    trs.sort((a, b) => (+a.dataset.orig || 0) - (+b.dataset.orig || 0));
+  } else {
+    const key = sceneSort.key;
+
+    trs.sort((a, b) => {
+      const va = a.querySelector(`[data-field="${key}"]`).value;
+      const vb = b.querySelector(`[data-field="${key}"]`).value;
+      const ea = va.trim() === '', eb = vb.trim() === '';
+
+      // 未计算的行（如声望留空）始终排最后
+      if (ea !== eb) return ea ? 1 : -1;
+
+      return (parseNum(va) - parseNum(vb)) * sceneSort.dir;
+    });
+  }
+
+  trs.forEach(tr => sceneRows.appendChild(tr));
+}
 
 renderSceneRows();
 
@@ -971,7 +1106,17 @@ cellSuggest.addEventListener('mousedown', e => {
   if (index >= 0 && cellInput) {
     e.preventDefault();
     const target = cellInput;
-    target.value = cellCurrent[index];
+    const picked = cellCurrent[index];
+    target.value = picked;
+
+    // 补全填入的物品与其他行重名时取消填入
+    if (nameIsDuplicate(target, picked.trim())) {
+      target.value = target.dataset.prev || '';
+      showDupToast(`已取消输入：「${picked}」在表格中已存在`);
+    } else {
+      target.dataset.prev = target.value;
+    }
+
     hideCellSuggest();
     syncRowStates();
     updateProfit();
