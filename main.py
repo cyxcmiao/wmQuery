@@ -37,6 +37,35 @@ HEADERS = {
 }
 
 
+class RequestPacer:
+    """全局请求限速：任意 1 秒窗口内最多 max_per_sec 个请求（warframe.market 限制 3 次/秒）
+
+    所有发往 wm 的请求（含并行请求）都先在此排队领取"名额"，保证并行也不会超限。
+    """
+
+    def __init__(self, max_per_sec=3):
+        self._lock = threading.Lock()
+        self._times = []
+        self._max = max_per_sec
+
+    def wait(self):
+        while True:
+            with self._lock:
+                now = time.time()
+                self._times = [t for t in self._times if now - t < 1.0]
+
+                if len(self._times) < self._max:
+                    self._times.append(now)
+                    return
+
+                sleep_time = 1.0 - (now - self._times[0])
+
+            time.sleep(max(sleep_time, 0.01))
+
+
+PACER = RequestPacer(3)
+
+
 def make_session():
     """创建带自动重试的请求会话：连接被重置等瞬时网络错误会自动重试 3 次"""
 
@@ -60,7 +89,7 @@ SESSION = make_session()
 # 物品列表本地缓存（存在脚本同目录）
 CACHE_FILE = os.path.join(BASE_DIR, "items_cache.json")
 CACHE_TTL_HOURS = 24  # 缓存有效时长（小时），超过后自动重新下载
-CACHE_VERSION = 4  # 缓存结构版本，字段变化时递增以强制刷新旧缓存
+CACHE_VERSION = 5  # 缓存结构版本，字段变化时递增以强制刷新旧缓存
 
 # 赋能升到对应等级需要的数量（maxRank -> 个数）
 RANK_NEED_COUNT = {0: 1, 1: 3, 2: 6, 3: 10, 4: 15, 5: 21}
@@ -110,8 +139,7 @@ def load_items_cache(max_age_hours):
 def save_items_cache(items):
     """把物品列表写入本地缓存，只保留用到的字段减小文件体积
 
-    赋能类（tags 含 arcane_enhancement 且不含 mod）保留 maxRank，
-    用于筛选满级卖单；MOD 类（tags 含 mod）不保留 maxRank，查询时仍按 0 级计价。
+    赋能类额外带 arcane 标记；赋能和 MOD 等可升级物品都保留 maxRank。
     """
 
     slim_items = []
@@ -132,9 +160,14 @@ def save_items_cache(items):
         }
 
         tags = item.get("tags") or []
+        is_arcane = "arcane_enhancement" in tags and "mod" not in tags
 
-        if "arcane_enhancement" in tags and "mod" not in tags:
+        # maxRank：赋能和 MOD 等可升级物品都保留（MOD 挂单查询 0 级和满级各需要一次）
+        if item.get("maxRank") is not None:
             slim["maxRank"] = item.get("maxRank")
+
+        if is_arcane:
+            slim["arcane"] = True
 
         slim_items.append(slim)
 
@@ -161,11 +194,7 @@ def get_all_items():
     url = f"{BASE_URL}/items"
 
     try:
-        response = SESSION.get(
-            url,
-            headers=HEADERS,
-            timeout=10
-        )
+        response = wm_get(url)
 
         response.raise_for_status()
 
@@ -183,7 +212,8 @@ def get_all_items():
 
     save_items_cache(items)
 
-    return items
+    # 返回瘦身后的列表，与"缓存命中"时的结构一致（带 arcane 标记与 maxRank）
+    return load_items_cache(None)
 
 
 def find_item(items, chinese_name):
@@ -201,16 +231,27 @@ def find_item(items, chinese_name):
     return None
 
 
-def get_orders(item_slug):
-    """查询指定物品的订单"""
+def wm_get(url):
+    """带全局限速的 GET：保证任意 1 秒内发往 wm 的请求不超过 3 个"""
 
-    url = f"{BASE_URL}/orders/item/{item_slug}"
+    PACER.wait()
 
-    response = SESSION.get(
-        url,
-        headers=HEADERS,
-        timeout=10
-    )
+    return SESSION.get(url, headers=HEADERS, timeout=10)
+
+
+def get_top_orders(item_slug, rank=None):
+    """查询物品的精简订单（v2 top 端点：卖单/买单各返回最优的5条，响应体远小于全量接口）
+
+    :param rank: 指定等级；None 表示不过滤等级（无等级概念的物品）
+    :return: {"sell": [...], "buy": [...]}
+    """
+
+    url = f"{BASE_URL}/orders/item/{item_slug}/top"
+
+    if rank is not None:
+        url += f"?rank={rank}"
+
+    response = wm_get(url)
 
     response.raise_for_status()
 
@@ -231,7 +272,7 @@ def get_closed_daily_avg(item_slug, full_rank=None):
 
     url = f"{STATS_BASE_URL}/items/{item_slug}/statistics"
 
-    response = SESSION.get(url, headers=HEADERS, timeout=10)
+    response = wm_get(url)
 
     response.raise_for_status()
 
@@ -292,38 +333,58 @@ def get_recent_closed_avg(item_slug, need_count=None, max_rank=None):
     return result
 
 
-def filter_sell_orders(orders, max_rank):
-    """筛选状态为“游戏内”的卖单
+def get_pricing_parallel(item_slug, rank_groups, need_count, full_rank):
+    """并行请求挂单（每个等级组一个请求）和成交统计，总耗时约等于最慢的一个
 
-    赋能类只看满级（rank == maxRank）；
-    MOD 只看0级和当前挂单中出现的最高等级（缓存里 MOD 没有满级等级，用最高 rank 推断），
-    其余等级（如3级）的卖单不参与；
-    其他物品没有等级概念，不过滤。
+    所有请求经 PACER 全局限速，保证不超过 3 次/秒。
+
+    :param rank_groups: 挂单请求的等级列表；赋能只看满级，MOD 为 [0, 满级]，普通物品为 [None]
+    :param need_count: 赋能折算为单个价格的个数
+    :param full_rank: 赋能满级等级（统计只看满级成交）；MOD/普通物品传 None
+    :return: (游戏内卖单列表（价格升序）, 三天成交中间价列表)
     """
 
-    ranks = [order.get("rank") for order in orders if order.get("rank") is not None]
-    mod_top_rank = max(ranks) if (max_rank is None and ranks) else None
+    results, errors = {}, {}
 
-    filtered = []
+    def work(key, fn):
+        try:
+            results[key] = fn()
+        except Exception as exc:  # noqa: BLE001 - 统一交回主线程处理
+            errors[key] = exc
 
-    for order in orders:
-        if order["type"] != "sell":
-            continue
+    threads = []
 
-        if order["user"]["status"] != "ingame":
-            continue
+    for i, rank in enumerate(rank_groups):
+        threads.append(threading.Thread(
+            target=work,
+            args=(("orders", i), lambda r=rank: get_top_orders(item_slug, r)),
+        ))
 
-        rank = order.get("rank")
+    threads.append(threading.Thread(
+        target=work,
+        args=(("closed",), lambda: get_recent_closed_avg(item_slug, need_count, full_rank)),
+    ))
 
-        if max_rank is not None:
-            if rank != max_rank:
-                continue
-        elif mod_top_rank is not None and rank not in (0, mod_top_rank):
-            continue
+    for t in threads:
+        t.start()
 
-        filtered.append(order)
+    for t in threads:
+        t.join()
 
-    return filtered
+    if errors:
+        # 挂单失败按网络错误抛出（由调用方转 502）；统计失败已在内部兜底
+        raise next(iter(errors.values()))
+
+    orders = []
+
+    for i in range(len(rank_groups)):
+        orders.extend(results[("orders", i)].get("sell", []))
+
+    # 只保留状态为“游戏内”的卖单，按价格从低到高
+    filtered = [order for order in orders if order["user"]["status"] == "ingame"]
+    filtered.sort(key=lambda order: order["platinum"])
+
+    return filtered, results[("closed",)]
 
 
 def load_history():
@@ -749,48 +810,52 @@ def api_query():
             "suggestions": suggestions
         }), 404
 
+    # 赋能只看满级；MOD 看0级和满级；其他物品不过滤等级
+    max_rank = item.get("maxRank")
+    is_arcane = item.get("arcane", False)
+    need_count = RANK_NEED_COUNT.get(max_rank) if is_arcane else None
+
+    if max_rank is None:
+        rank_groups = [None]
+    elif is_arcane:
+        rank_groups = [max_rank]
+    else:
+        rank_groups = [0, max_rank]
+
     try:
-        orders = get_orders(item["slug"])
+        filtered, closed = get_pricing_parallel(item["slug"], rank_groups, need_count,
+                                                max_rank if is_arcane else None)
     except requests.RequestException:
         # 网络异常（含自动重试后仍失败）：返回明确错误，而不是 500 崩掉
         return jsonify({
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
 
-    # 赋能只看满级；MOD 只看0级和当前挂单最高等级
-    max_rank = item.get("maxRank")
+    # 两种等级中较低的3个卖单
+    filtered = filtered[:3]
 
-    filtered = filter_sell_orders(orders, max_rank)
-
-    # 按价格从低到高排序，取前5
-    filtered.sort(key=lambda order: order["platinum"])
-
-    top5 = [
+    top_orders = [
         {
             "platinum": order["platinum"],
             "player": order["user"]["ingameName"],
             "quantity": order["quantity"],
         }
-        for order in filtered[:5]
+        for order in filtered
     ]
 
-    # 记录查询历史（只在查询成功时记录，保存前5卖单的全部价格）
+    # 记录查询历史（只在查询成功时记录，保存卖单的全部价格）
     history = add_history(
         item["i18n"]["zh-hans"]["name"],
-        [order["platinum"] for order in top5],
-        RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None,
+        [order["platinum"] for order in top_orders],
+        need_count,
     )
 
-    # 近三日（UTC日期）成交均价 a/b/c 与挂单均价 d、最低3个卖单 d1/d2/d3
+    # 近三日（UTC日期）成交中间价 a/b/c 与挂单均价 d、最低3个卖单 d1/d2/d3
     # （赋能类均已折算为单个价格）
-    need_count = RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None
-
     def to_unit(price):
         return round(price / need_count, 2) if need_count else price
 
-    top3 = [order["platinum"] for order in filtered[:3]]
-
-    closed = get_recent_closed_avg(item["slug"], need_count, max_rank)
+    top3 = [order["platinum"] for order in filtered]
 
     wm_avg = round(sum(top3) / len(top3) / (need_count or 1), 2) if top3 else None
 
@@ -802,7 +867,7 @@ def api_query():
             # 赋能类显示升到满级需要的数量（如 maxRank=5 需要 21 个）
             "need_count": need_count,
         },
-        "orders": top5,
+        "orders": top_orders,
         "wm_avg": wm_avg,
         "top3": [to_unit(p) for p in top3],
         "closed": closed,
@@ -831,25 +896,27 @@ def api_price():
             "suggestions": suggestions
         }), 404
 
+    # 与 /api/query 相同的口径：赋能只看满级，MOD 看0级和满级，其他物品不过滤等级
+    max_rank = item.get("maxRank")
+    is_arcane = item.get("arcane", False)
+    need_count = RANK_NEED_COUNT.get(max_rank) if is_arcane else None
+
+    if max_rank is None:
+        rank_groups = [None]
+    elif is_arcane:
+        rank_groups = [max_rank]
+    else:
+        rank_groups = [0, max_rank]
+
     try:
-        orders = get_orders(item["slug"])
+        filtered, closed = get_pricing_parallel(item["slug"], rank_groups, need_count,
+                                                max_rank if is_arcane else None)
     except requests.RequestException:
         return jsonify({
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
 
-    # 与 /api/query 相同的筛选规则：赋能只看满级，MOD 只看0级和当前挂单最高等级
-    max_rank = item.get("maxRank")
-    need_count = RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None
-
-    filtered = filter_sell_orders(orders, max_rank)
-
-    filtered.sort(key=lambda order: order["platinum"])
-
     top3 = [order["platinum"] for order in filtered[:3]]
-
-    # 近三日（UTC日期）成交中间价 a/b/c：赋能只看满级、MOD只看0级，赋能已折算为单个价格
-    closed = get_recent_closed_avg(item["slug"], need_count, max_rank)
 
     if not top3:
         return jsonify({
