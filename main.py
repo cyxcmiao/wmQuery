@@ -630,7 +630,8 @@ def api_query():
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
 
-    # 赋能类只看满级卖单（rank == maxRank），MOD 和其他物品只看0级
+    # 赋能类只看满级卖单（rank == maxRank）；MOD 和其他物品忽略等级，
+    # 任意等级的卖单一起比价（有些满级 MOD 价格和 0 级接近，只看 0 级会漏掉更便宜的）
     max_rank = item.get("maxRank")
 
     filtered = []
@@ -643,11 +644,7 @@ def api_query():
         if order["user"]["status"] != "ingame":
             continue
 
-        if max_rank is None:
-            # MOD 按 0 级（未安装）计价
-            if order.get("rank", 0) != 0:
-                continue
-        elif order.get("rank") != max_rank:
+        if max_rank is not None and order.get("rank") != max_rank:
             continue
 
         filtered.append(order)
@@ -712,7 +709,7 @@ def api_price():
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
 
-    # 与 /api/query 相同的筛选规则：赋能只看满级，MOD 和其他物品只看0级
+    # 与 /api/query 相同的筛选规则：赋能只看满级，MOD 和其他物品忽略等级
     max_rank = item.get("maxRank")
     need_count = RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None
 
@@ -726,10 +723,7 @@ def api_price():
         if order["user"]["status"] != "ingame":
             continue
 
-        if max_rank is None:
-            if order.get("rank", 0) != 0:
-                continue
-        elif order.get("rank") != max_rank:
+        if max_rank is not None and order.get("rank") != max_rank:
             continue
 
         filtered.append(order)
