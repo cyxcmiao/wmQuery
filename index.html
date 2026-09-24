@@ -153,7 +153,7 @@ td.rank-no { color: #8a97a5; }
   padding: 8px 8px; border-bottom: 1px solid #d3dde5;
   white-space: nowrap;
 }
-.scene-table th:last-child { width: 64px; }
+.scene-table th:last-child { width: 108px; }
 /* 名称列加宽：约为自适应时的2倍 */
 .scene-table th:first-child { width: 23%; }
 /* 可排序表头（期望价格、白金/十万声望） */
@@ -172,17 +172,26 @@ td.rank-no { color: #8a97a5; }
 .cell-input.input-error { background: #ffe1de; border-color: #e26d5a; color: #d64541; }
 .cell-input[data-field="final"] { color: #b07d1a; font-weight: 600; }
 .cell-input[readonly] { background: #f6f8fa; }
-/* wm查询价格列：宽度约为其他列的两倍（原自适应约10%，加倍为20%） */
+/* wm查询价格列：默认宽度20%（约为其他列的两倍），数据较长时表格自适应加宽该列 */
 .scene-table th.col-wm { width: 20%; }
 /* wm查询价格列：两行文本，第一行为近三天成交中间价统计（蓝色） */
 .wm-display {
   min-height: 34px; padding: 7px 6px; font-size: 12.5px; line-height: 1.4;
   color: #2a3440; border: 1px solid #dbe3ea; border-radius: 6px;
-  background: #f8fafc; font-variant-numeric: tabular-nums; word-break: break-all;
+  background: #f8fafc; font-variant-numeric: tabular-nums;
+  white-space: nowrap;  /* 数据较长时列自适应加宽，不换行 */
 }
 .wm-display .closed, #price-stats .closed { color: #2b87c0; font-weight: 600; }
+/* 声望列：宽度为其他自适应列的1.5倍（实测65px -> 约98px） */
+.scene-table th.col-standing { width: 11.2%; }
 .wm-display.readonly { color: #8a97a5; background: #f6f8fa; }
 .wm-display.gold-border { border-color: #b07d1a; }
+/* 操作列：单行更新 + 删除 两个按钮并排 */
+.row-actions { display: flex; gap: 4px; }
+.row-actions button { flex: 1; padding: 5px 4px; font-size: 12px; border: none; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.row-update { color: #1d6fa5; background: #e3f0f9; }
+.row-update:hover { background: #d0e7f5; }
+.row-update:disabled { color: #8a97a5; background: #f0f2f5; cursor: default; }
 .row-del {
   padding: 5px 10px; font-size: 13px; cursor: pointer;
   color: #d64541; background: #fdeceb; border: none; border-radius: 6px;
@@ -326,7 +335,7 @@ td.rank-no { color: #8a97a5; }
             <tr>
               <th>名称</th>
               <th>掉率</th>
-              <th>声望</th>
+              <th class="col-standing">声望</th>
               <th>自定义价格</th>
               <th class="col-wm">wm查询价格</th>
               <th class="sortable" data-sort="final">期望价格<span class="sort-arrow"></span></th>
@@ -628,7 +637,7 @@ function sceneRowHtml(name, rate, custom, standing) {
     <td><div class="wm-display" data-field="wm"></div></td>
     <td><input class="cell-input num" data-field="final" readonly></td>
     <td class="col-ptm"><input class="cell-input num" data-field="ptm" readonly></td>
-    <td><button class="row-del">删除</button></td>
+    <td><div class="row-actions"><button class="row-update" title="只查询本行的价格">单行更新</button><button class="row-del">删除</button></div></td>
   </tr>`;
 }
 
@@ -638,11 +647,15 @@ function sceneRowHtml(name, rate, custom, standing) {
 // 第二行：挂单价 d（d1/d2/d3），d = 挂单均价，d1/d2/d3 = 最低3个卖单
 function formatPriceStats(closed, wmAvg, top3) {
   const vals = closed.filter(v => v !== null && v !== undefined);
-  const avg3 = vals.length
+  // 任一天缺失 -> 平均值视为缺失（avg3 = null），只有三天齐全才算平均
+  const avg3 = (vals.length === closed.length && closed.length > 0)
     ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length * 100) / 100
     : null;
-  const statLine = avg3 === null ? '数据缺失'
-    : `${avg3}（${closed.map(v => (v === null || v === undefined) ? '数据缺失' : v).join('/')}）`;
+  const hasMissing = closed.some(v => v === null || v === undefined);
+  // 三天内任一天缺失：三天平均值也按「数据缺失」显示（计算取0）；全部缺失时整行只显示「数据缺失」
+  const statLine = avg3 === null
+    ? (vals.length ? `数据缺失（${closed.map(v => (v === null || v === undefined) ? '数据缺失' : v).join('/')}）` : '数据缺失')
+    : `${avg3}（${closed.map(v => v).join('/')}）`;
   const liveLine = (wmAvg === null || wmAvg === undefined) ? '' : `${wmAvg}（${top3.join('/')}）`;
 
   if (statLine === '数据缺失' && !liveLine) return '';
@@ -664,15 +677,15 @@ function setWmDisplay(wm, closed, wmAvg, top3) {
   wm.dataset.closed = JSON.stringify(closed);
 }
 
-// 从 dataset.closed 解析三天成交中间价并求三天平均值（缺失的日子不参与）；无有效数据返回 NaN
+// 从 dataset.closed 解析三天成交中间价并求三天平均值；任一天缺失即返回 NaN（计算取0）
 function parseClosedAvg3(text) {
   try {
     const arr = JSON.parse(text || 'null');
 
-    if (Array.isArray(arr)) {
-      const vals = arr.filter(v => typeof v === 'number' && !isNaN(v));
+    if (Array.isArray(arr) && arr.length) {
+      const complete = arr.every(v => typeof v === 'number' && !isNaN(v));
 
-      if (vals.length) return vals.reduce((s, v) => s + v, 0) / vals.length;
+      if (complete) return arr.reduce((s, v) => s + v, 0) / arr.length;
     }
   } catch (e) { /* 旧格式或损坏数据按无统计处理 */ }
 
@@ -980,11 +993,41 @@ dropMultInput.addEventListener('input', () => {
   scheduleSceneSave();
 });
 
-sceneRows.addEventListener('click', e => {
+sceneRows.addEventListener('click', async e => {
   if (e.target.closest('.row-del')) {
     e.target.closest('tr').remove();
     hideCellSuggest();
     updateProfit();
+    scheduleSceneSave();
+    return;
+  }
+
+  // 单行更新：只查询这一行的价格（名称为空或已填自定义价格时跳过）
+  const updateBtn = e.target.closest('.row-update');
+
+  if (updateBtn) {
+    if (updating) return;
+
+    const tr = updateBtn.closest('tr');
+    const name = tr.querySelector('[data-field="name"]').value.trim();
+
+    if (name === '') {
+      showDupToast('请先输入物品名称');
+      return;
+    }
+
+    if (tr.querySelector('[data-field="custom"]').value.trim() !== '') {
+      showDupToast('该行已填自定义价格，无需查询');
+      return;
+    }
+
+    updating = true;
+    updateBtn.disabled = true;
+
+    await queryRowPrice(tr);
+
+    updating = false;
+    updateBtn.disabled = false;
     scheduleSceneSave();
   }
 });
@@ -1276,49 +1319,70 @@ async function pacePriceQuery() {
   lastPriceQueryAt = Date.now();
 }
 
+// 查询单行价格（挂单+成交统计），名称为空或已填自定义价格时不查询；返回是否实际查询了
+async function queryRowPrice(tr) {
+  const name = tr.querySelector('[data-field="name"]').value.trim();
+  const custom = tr.querySelector('[data-field="custom"]').value.trim();
+  const wm = tr.querySelector('[data-field="wm"]');
+
+  if (!name || custom !== '') return false;
+
+  await pacePriceQuery();
+
+  try {
+    const res = await fetch('/api/price?name=' + encodeURIComponent(name));
+
+    if (!res.ok) {
+      // 404 物品不存在，其他状态（如 502 网络失败）按查询失败处理
+      wm.textContent = res.status === 404 ? '物品不存在' : '查询失败';
+      wm.dataset.closed = '';
+    } else {
+      const data = await res.json();
+      const closed = Array.isArray(data.closed) ? data.closed : [null, null, null];
+
+      if (!Array.isArray(data.prices) || data.prices.length < 3) {
+        // 挂单不足3条：有成交统计时只显示统计部分
+        setWmDisplay(wm, closed, null, []);
+      } else {
+        // 显示为两行：第一行近三天成交中间价统计（蓝色），第二行挂单价
+        setWmDisplay(wm, closed, data.avg, data.prices);
+      }
+    }
+  } catch (e) {
+    wm.textContent = '查询失败';
+    wm.dataset.closed = '';
+  }
+
+  syncRowStates();
+  updateProfit();
+  return true;
+}
+
 updateBtn.addEventListener('click', async () => {
   if (updating || !sceneData) return;
 
   updating = true;
   updateBtn.disabled = true;
-  updateBtn.textContent = '查询中...';
 
-  for (const tr of sceneRows.querySelectorAll('tr')) {
+  // 统计需要查询的行数，用于显示进度（如 3/13）
+  const todoRows = [...sceneRows.querySelectorAll('tr')].filter(tr => {
     const name = tr.querySelector('[data-field="name"]').value.trim();
     const custom = tr.querySelector('[data-field="custom"]').value.trim();
-    const wm = tr.querySelector('[data-field="wm"]');
+    return name !== '' && custom === '';
+  });
+  const total = todoRows.length;
+  let done = 0;
 
-    // 名称或自定义价格已有值的行不查询
-    if (!name || custom !== '') continue;
+  const setProgress = () => { updateBtn.textContent = `查询中... ${done}/${total}`; };
+  setProgress();
 
-    await pacePriceQuery();
+  for (const tr of sceneRows.querySelectorAll('tr')) {
+    const queried = await queryRowPrice(tr);
 
-    try {
-      const res = await fetch('/api/price?name=' + encodeURIComponent(name));
-
-      if (!res.ok) {
-        // 404 物品不存在，其他状态（如 502 网络失败）按查询失败处理
-        wm.textContent = res.status === 404 ? '物品不存在' : '查询失败';
-        wm.dataset.closed = '';
-      } else {
-        const data = await res.json();
-        const closed = Array.isArray(data.closed) ? data.closed : [null, null, null];
-
-        if (!Array.isArray(data.prices) || data.prices.length < 3) {
-          // 挂单不足3条：有成交统计时只显示 a/b/c，计算仍用 a
-          setWmDisplay(wm, closed, null, []);
-        } else {
-          // 显示为两行：第一行近三天成交中间价统计（蓝色），第二行挂单价
-          setWmDisplay(wm, closed, data.avg, data.prices);
-        }
-      }
-    } catch (e) {
-      wm.textContent = '查询失败';
-      wm.dataset.closed = '';
+    if (queried) {
+      done += 1;
+      setProgress();
     }
-
-    syncRowStates();
-    updateProfit();
   }
 
   ensureTrailingEmptyRow();
