@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import webbrowser
+from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -214,6 +215,115 @@ def get_orders(item_slug):
     response.raise_for_status()
 
     return response.json()["data"]
+
+
+STATS_BASE_URL = "https://api.warframe.market/v1"
+
+
+def get_closed_daily_avg(item_slug, full_rank=None):
+    """查询物品近90天已成交订单的按日中间价（warframe.market v1 统计接口，median 字段）
+
+    :param full_rank: 赋能类传满级等级，只统计 mod_rank == 满级 的成交记录；
+                      MOD 和其他物品传 None——成交记录带 mod_rank 的（MOD类）只统计0级，
+                      不带 mod_rank 的（普通物品）不过滤等级
+    :return: {UTC日期字符串: 当日成交中间价}
+    """
+
+    url = f"{STATS_BASE_URL}/items/{item_slug}/statistics"
+
+    response = SESSION.get(url, headers=HEADERS, timeout=10)
+
+    response.raise_for_status()
+
+    closed = response.json()["payload"]["statistics_closed"].get("90days", [])
+
+    # MOD 类物品的成交记录带 mod_rank：只统计 0 级
+    has_rank_field = any("mod_rank" in entry for entry in closed)
+
+    by_date = {}
+
+    for entry in closed:
+        if full_rank is not None:
+            # 赋能的成交记录按 mod_rank 拆条，只看满级
+            if entry.get("mod_rank") != full_rank:
+                continue
+        elif has_rank_field and entry.get("mod_rank", 0) != 0:
+            continue
+
+        median = entry.get("median")
+
+        if median is None:
+            continue
+
+        day = entry["datetime"][:10]
+        by_date.setdefault(day, []).append(median)
+
+    # MOD 的成交记录按 mod_rank 拆成多条，合并为当日中间价（简单平均）
+    return {day: sum(vals) / len(vals) for day, vals in by_date.items()}
+
+
+def get_recent_closed_avg(item_slug, need_count=None, max_rank=None):
+    """取昨天/前天/大前天（UTC日期）的成交中间价
+
+    :param need_count: 赋能类折算为单个价格时需要的个数，其他物品为 None
+    :param full_rank: 赋能类的满级等级；MOD 只统计0级成交，普通物品不过滤
+    :return: [a, b, c]，某天没有成交时对应位置为 None；统计查询失败也返回 [None, None, None]，
+             不影响挂单价格的展示
+    """
+
+    try:
+        by_date = get_closed_daily_avg(item_slug, full_rank=max_rank)
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return [None, None, None]
+
+    now = datetime.now(timezone.utc)
+
+    result = []
+
+    for i in (1, 2, 3):
+        day = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        avg = by_date.get(day)
+
+        if avg is not None and need_count:
+            avg /= need_count
+
+        result.append(round(avg, 2) if avg is not None else None)
+
+    return result
+
+
+def filter_sell_orders(orders, max_rank):
+    """筛选状态为“游戏内”的卖单
+
+    赋能类只看满级（rank == maxRank）；
+    MOD 只看0级和当前挂单中出现的最高等级（缓存里 MOD 没有满级等级，用最高 rank 推断），
+    其余等级（如3级）的卖单不参与；
+    其他物品没有等级概念，不过滤。
+    """
+
+    ranks = [order.get("rank") for order in orders if order.get("rank") is not None]
+    mod_top_rank = max(ranks) if (max_rank is None and ranks) else None
+
+    filtered = []
+
+    for order in orders:
+        if order["type"] != "sell":
+            continue
+
+        if order["user"]["status"] != "ingame":
+            continue
+
+        rank = order.get("rank")
+
+        if max_rank is not None:
+            if rank != max_rank:
+                continue
+        elif mod_top_rank is not None and rank not in (0, mod_top_rank):
+            continue
+
+        filtered.append(order)
+
+    return filtered
 
 
 def load_history():
@@ -528,12 +638,29 @@ def api_scene_save(scene_id):
             if not isinstance(row, dict):
                 continue
 
+            closed = row.get("closed")
+
+            if isinstance(closed, list):
+                # 新格式：三天成交均价 [昨天,前天,大前天]，缺失为 None
+                clean_closed = []
+
+                for v in closed[:3]:
+                    clean_closed.append(v if isinstance(v, (int, float)) and not isinstance(v, bool) else None)
+
+                closed = clean_closed
+            elif isinstance(closed, (int, float)) and not isinstance(closed, bool):
+                closed = [closed, None, None]  # 更早版本只存了昨天的均价
+            else:
+                closed = None
+
             clean.append({
                 "name": str(row.get("name", "")).strip()[:100],
                 "rate": str(row.get("rate", "")).strip()[:20],
                 "standing": str(row.get("standing", "")).strip()[:20],
                 "custom": str(row.get("custom", "")).strip()[:20],
-                "wm": str(row.get("wm", "")).strip()[:20],
+                # wm 为两行文本（统计数据+挂单价），放宽截断长度
+                "wm": str(row.get("wm", "")).strip()[:120],
+                "closed": closed,
             })
 
         data["elements"] = clean
@@ -630,24 +757,10 @@ def api_query():
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
 
-    # 赋能类只看满级卖单（rank == maxRank）；MOD 和其他物品忽略等级，
-    # 任意等级的卖单一起比价（有些满级 MOD 价格和 0 级接近，只看 0 级会漏掉更便宜的）
+    # 赋能只看满级；MOD 只看0级和当前挂单最高等级
     max_rank = item.get("maxRank")
 
-    filtered = []
-
-    for order in orders:
-
-        if order["type"] != "sell":
-            continue
-
-        if order["user"]["status"] != "ingame":
-            continue
-
-        if max_rank is not None and order.get("rank") != max_rank:
-            continue
-
-        filtered.append(order)
+    filtered = filter_sell_orders(orders, max_rank)
 
     # 按价格从低到高排序，取前5
     filtered.sort(key=lambda order: order["platinum"])
@@ -668,15 +781,31 @@ def api_query():
         RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None,
     )
 
+    # 近三日（UTC日期）成交均价 a/b/c 与挂单均价 d、最低3个卖单 d1/d2/d3
+    # （赋能类均已折算为单个价格）
+    need_count = RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None
+
+    def to_unit(price):
+        return round(price / need_count, 2) if need_count else price
+
+    top3 = [order["platinum"] for order in filtered[:3]]
+
+    closed = get_recent_closed_avg(item["slug"], need_count, max_rank)
+
+    wm_avg = round(sum(top3) / len(top3) / (need_count or 1), 2) if top3 else None
+
     return jsonify({
         "item": {
             "name": item["i18n"]["zh-hans"]["name"],
             "name_en": item["i18n"]["en"]["name"],
             "slug": item["slug"],
             # 赋能类显示升到满级需要的数量（如 maxRank=5 需要 21 个）
-            "need_count": RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None,
+            "need_count": need_count,
         },
         "orders": top5,
+        "wm_avg": wm_avg,
+        "top3": [to_unit(p) for p in top3],
+        "closed": closed,
         "history": history,
     })
 
@@ -709,28 +838,18 @@ def api_price():
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
 
-    # 与 /api/query 相同的筛选规则：赋能只看满级，MOD 和其他物品忽略等级
+    # 与 /api/query 相同的筛选规则：赋能只看满级，MOD 只看0级和当前挂单最高等级
     max_rank = item.get("maxRank")
     need_count = RANK_NEED_COUNT.get(max_rank) if max_rank is not None else None
 
-    filtered = []
-
-    for order in orders:
-
-        if order["type"] != "sell":
-            continue
-
-        if order["user"]["status"] != "ingame":
-            continue
-
-        if max_rank is not None and order.get("rank") != max_rank:
-            continue
-
-        filtered.append(order)
+    filtered = filter_sell_orders(orders, max_rank)
 
     filtered.sort(key=lambda order: order["platinum"])
 
     top3 = [order["platinum"] for order in filtered[:3]]
+
+    # 近三日（UTC日期）成交中间价 a/b/c：赋能只看满级、MOD只看0级，赋能已折算为单个价格
+    closed = get_recent_closed_avg(item["slug"], need_count, max_rank)
 
     if not top3:
         return jsonify({
@@ -738,6 +857,7 @@ def api_price():
             "need_count": need_count,
             "prices": [],
             "avg": None,
+            "closed": closed,
         })
 
     # 赋能折算为单个价格：均价按原始价计算，展示价格逐个折算并至多保留两位小数
@@ -751,6 +871,7 @@ def api_price():
         "need_count": need_count,
         "prices": [to_unit(p) for p in top3],
         "avg": round(avg / need_count, 2) if need_count else round(avg, 2),
+        "closed": closed,
     })
 
 
