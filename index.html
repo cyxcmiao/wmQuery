@@ -382,6 +382,15 @@ td.rank-no { color: #8a97a5; }
     </div>
   </div>
 </div>
+<div id="reupdate-mask" class="modal-mask hidden">
+  <div class="modal">
+    <p>今天已更新过该场景的数据，确定要再次查询吗？</p>
+    <div class="modal-btns">
+      <button id="reupdate-cancel">取消</button>
+      <button id="reupdate-ok">确认</button>
+    </div>
+  </div>
+</div>
 <div id="dup-toast"></div>
 <script>
 const $ = id => document.getElementById(id);
@@ -812,7 +821,20 @@ function flushSceneSave() {
 }
 
 function updateUpdateTime() {
-  $('update-time').value = (sceneData && sceneData.update_time) ? fmtTime(sceneData.update_time) : '未查询';
+  if (!sceneData || !sceneData.update_time) {
+    $('update-time').value = '未查询';
+    return;
+  }
+
+  // 括号说明距上次查询过了多少天（按自然日计算，当天显示“今天”）
+  const t = sceneData.update_time;
+  const a = new Date(t * 1000);
+  const b = new Date();
+  a.setHours(0, 0, 0, 0);
+  b.setHours(0, 0, 0, 0);
+  const days = Math.round((b - a) / 86400000);
+  const ago = days <= 0 ? '今天' : `${days}天前`;
+  $('update-time').value = `${fmtTime(t)}（${ago}）`;
 }
 
 // ---- 场景标题改名：保存后同步侧边栏（场景ID随名称变化） ----
@@ -1187,12 +1209,15 @@ document.querySelectorAll('.scene-table th.sortable').forEach(th => {
   th.addEventListener('click', () => {
     const key = th.dataset.sort;
 
+    // 白金/十万声望列第一次点击先降序，其他列先正序；再点反向，第三次恢复默认顺序
+    const startDir = key === 'ptm' ? -1 : 1;
+
     if (!sceneSort || sceneSort.key !== key) {
-      sceneSort = { key, dir: 1 };   // 第一次点击：正序
-    } else if (sceneSort.dir === 1) {
-      sceneSort.dir = -1;            // 第二次点击：倒序
+      sceneSort = { key, dir: startDir };
+    } else if (sceneSort.dir === startDir) {
+      sceneSort.dir = -startDir;
     } else {
-      sceneSort = null;              // 第三次点击：恢复默认顺序
+      sceneSort = null;
     }
 
     applySceneSort();
@@ -1358,7 +1383,37 @@ async function queryRowPrice(tr) {
   return true;
 }
 
+// 当天（自然日）是否已更新过数据
+function isUpdatedToday() {
+  if (!sceneData || !sceneData.update_time) return false;
+
+  const a = new Date(sceneData.update_time * 1000);
+  const b = new Date();
+
+  return a.getFullYear() === b.getFullYear() &&
+         a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
 updateBtn.addEventListener('click', async () => {
+  if (updating || !sceneData) return;
+
+  // 当天已更新过：弹出确认悬浮窗，确认后才再次查询
+  if (isUpdatedToday()) {
+    $('reupdate-mask').classList.remove('hidden');
+    return;
+  }
+
+  await runUpdateData();
+});
+
+$('reupdate-cancel').addEventListener('click', () => $('reupdate-mask').classList.add('hidden'));
+$('reupdate-mask').addEventListener('click', e => { if (e.target.id === 'reupdate-mask') e.target.classList.add('hidden'); });
+$('reupdate-ok').addEventListener('click', async () => {
+  $('reupdate-mask').classList.add('hidden');
+  await runUpdateData();
+});
+
+async function runUpdateData() {
   if (updating || !sceneData) return;
 
   updating = true;
@@ -1387,6 +1442,10 @@ updateBtn.addEventListener('click', async () => {
 
   ensureTrailingEmptyRow();
 
+  // 更新完成后自动按“白金/十万声望”降序排序
+  sceneSort = { key: 'ptm', dir: -1 };
+  applySceneSort();
+
   sceneData.update_time = Date.now() / 1000;
   updateUpdateTime();
   saveScene();  // 立即保存查询结果和时间
@@ -1394,7 +1453,7 @@ updateBtn.addEventListener('click', async () => {
   updating = false;
   updateBtn.disabled = false;
   updateBtn.textContent = '更新数据';
-});
+}
 
 // ---- 场景弹窗（新增命名 / 删除确认） ----
 function openModal(mode, scene) {
