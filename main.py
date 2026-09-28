@@ -439,6 +439,196 @@ def add_history(name, prices=None, need_count=None):
     return history
 
 
+# -------------------------
+# 未入库遗物查询：数据源为灰机wiki「虚空遗物/奖励表/以奖励划分」页面
+# 一次解析同时得到：遗物入库状态（未入库/已入库/虚空商人）+ 掉落物 + 稀有度（全中文）
+# 版本更新慢，采用手动更新：页面加载只读本地缓存，点「更新数据」按钮才联网抓取
+# -------------------------
+
+RELICS_CACHE_FILE = os.path.join(CACHE_DIR, "relics_cache.json")
+RELICS_CACHE_VERSION = 1
+RELIC_WIKI_URL = (
+    "https://warframe.huijiwiki.com/wiki/"
+    "%E8%99%9A%E7%A9%BA%E9%81%97%E7%89%A9/%E5%A5%96%E5%8A%B1%E8%A1%A8/"
+    "%E4%BB%A5%E5%A5%96%E5%8A%B1%E5%88%92%E5%88%86"
+)
+RELIC_ERAS = ("古纪", "前纪", "中纪", "后纪")  # 只收录四个纪元，安魂遗物天然被排除
+RELIC_RARITY_ZH = {"rare": "稀有", "uncommon": "罕见", "common": "常见"}
+RELIC_RARITY_ORDER = {"稀有": 0, "罕见": 1, "常见": 2}
+
+# 徽章结构：<span [title="该遗物已入库|该遗物为虚空商人遗物"]
+#          class="label label-success|disable|primary label-relic">古纪 L8 <span class="label-relic-rare"
+_RELIC_BADGE_RE = re.compile(
+    r'<span(?: title="(?P<title>[^"]*)")? class="label label-(?P<cls>\w+) label-relic">'
+    r"(?P<era>古纪|前纪|中纪|后纪) (?P<code>[A-Z]+\d+) "
+    r'<span class="label-relic-(?P<rarity>\w+)"'
+)
+
+# 行结构：物品单元格可能带 rowspan（跨多行），部件单元格固定 width="25%"
+_RELIC_ROW_SPLIT_RE = re.compile(r'<tr class="filter-div--item"')
+_RELIC_ITEM_CELL_RE = re.compile(r'<td rowspan="\d+" width="25%">.*?title="[^"]*">([^<]+)</a>', re.S)
+_RELIC_PART_CELL_RE = re.compile(r'<td width="25%">([^<]+)</td>')
+
+
+def _relic_badge_status(cls, title):
+    """根据徽章 class 与 title 判定遗物状态：active=未入库 baro=虚空商人 vaulted=已入库"""
+
+    if title == "该遗物为虚空商人遗物":
+        return "baro"
+    if title == "该遗物已入库" or cls == "disable":
+        return "vaulted"
+    return "active"
+
+
+def parse_relic_page(html):
+    """解析奖励表页面 HTML，返回全部遗物列表
+
+    每个遗物：{name, era, code, status, drops: [{name, rarity}]}
+    drops 已按部件去重，稀有度统一为中文。
+    """
+
+    relics = {}
+    current_item = ""
+
+    # 物品名在 rowspan 单元格里，跨行复用；先全局按行切分再逐行提取
+    for row in _RELIC_ROW_SPLIT_RE.split(html)[1:]:
+        row = row.split("</tr>")[0]
+
+        # rowspan 物品单元格一定是行内第一个 td（行首是 tr 属性），用 search 匹配
+        item_m = _RELIC_ITEM_CELL_RE.search(row)
+        if item_m:
+            current_item = item_m.group(1).strip()
+
+        part_m = _RELIC_PART_CELL_RE.search(row)
+        if not part_m:
+            continue
+        part = part_m.group(1).strip()
+
+        for m in _RELIC_BADGE_RE.finditer(row):
+            status = _relic_badge_status(m.group("cls"), m.group("title"))
+            key = (m.group("era"), m.group("code"))
+            relic = relics.setdefault(key, {
+                "name": f"{key[0]} {key[1]}",
+                "era": key[0],
+                "code": key[1],
+                "status": status,
+                "drops": [],
+            })
+            drop = {"name": f"{current_item} {part}".strip(),
+                    "rarity": RELIC_RARITY_ZH.get(m.group("rarity"), m.group("rarity"))}
+            if drop not in relic["drops"]:
+                relic["drops"].append(drop)
+
+    result = list(relics.values())
+
+    # 掉落物按 稀有→罕见→常见 排序
+    for relic in result:
+        relic["drops"].sort(key=lambda d: RELIC_RARITY_ORDER.get(d["rarity"], 9))
+
+    return result
+
+
+def load_relics_cache():
+    """读取遗物本地缓存，损坏或版本不符时返回 None"""
+
+    if not os.path.exists(RELICS_CACHE_FILE):
+        return None
+
+    try:
+        with open(RELICS_CACHE_FILE, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+
+        if cache.get("version") != RELICS_CACHE_VERSION:
+            return None
+
+        return {"fetched_at": cache["fetched_at"], "relics": cache["data"]}
+
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+
+
+def save_relics_cache(relics):
+    ensure_cache_dir()
+
+    with open(RELICS_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            {"version": RELICS_CACHE_VERSION, "fetched_at": time.time(), "data": relics},
+            f,
+            ensure_ascii=False
+        )
+
+
+def fetch_relics_from_wiki():
+    """抓取并解析灰机wiki奖励表页面，返回全部遗物列表"""
+
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/126.0.0.0 Safari/537.36"),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+    try:
+        resp = SESSION.get(RELIC_WIKI_URL, headers=headers, timeout=60)
+    except requests.RequestException as e:
+        raise RuntimeError(f"连接灰机wiki失败：{e.__class__.__name__}，请检查网络后重试")
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"灰机wiki返回异常状态 {resp.status_code}，请稍后重试")
+
+    html = resp.text
+
+    if "Just a moment" in html[:2000] or "challenges.cloudflare" in html[:2000]:
+        raise RuntimeError("灰机wiki触发了访问验证，请稍后重试")
+
+    relics = parse_relic_page(html)
+
+    if not relics:
+        raise RuntimeError("解析灰机wiki页面得到 0 个遗物，页面结构可能已变化，请反馈排查")
+
+    return relics
+
+
+def relics_view_payload(fetched_at, relics):
+    """组装前端需要的未入库视图：未入库 + 虚空商人遗物，按纪元/编号排序"""
+
+    era_order = {era: i for i, era in enumerate(RELIC_ERAS)}
+    view = [r for r in relics if r["status"] in ("active", "baro")]
+    view.sort(key=lambda r: (era_order.get(r["era"], 9), r["code"]))
+
+    return {
+        "fetched_at": fetched_at,
+        "total_in_wiki": len(relics),
+        "relics": view,
+    }
+
+
+@app.route("/api/relics")
+def api_relics():
+    """当前未入库遗物列表（只读本地缓存，不联网）"""
+
+    cache = load_relics_cache()
+
+    if cache is None:
+        return jsonify({"error": "暂无遗物数据，请先点击「更新数据」", "need_update": True})
+
+    return jsonify(relics_view_payload(cache["fetched_at"], cache["relics"]))
+
+
+@app.route("/api/relics/update", methods=["POST"])
+def api_relics_update():
+    """手动更新：联网抓取灰机wiki并重建本地缓存"""
+
+    try:
+        relics = fetch_relics_from_wiki()
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+
+    save_relics_cache(relics)
+
+    return jsonify(relics_view_payload(time.time(), relics))
+
+
 @app.route("/")
 def index():
     """查询页面"""

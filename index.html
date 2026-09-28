@@ -279,6 +279,56 @@ td.rank-no { color: #8a97a5; }
 .modal-btns button:hover { border-color: #b9c6d2; }
 #modal-ok { background: #2b87c0; color: #fff; border: none; }
 #modal-ok:hover { background: #3aa0d8; }
+
+/* ---- 未入库遗物查询 ---- */
+.relic-toolbar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 18px;
+}
+.era-filter { display: flex; gap: 6px; }
+.era-filter button {
+  padding: 6px 14px; font-size: 13px; cursor: pointer;
+  border: 1px solid #d3dde5; background: #fff; color: #2a3440; border-radius: 999px;
+}
+.era-filter button:hover { border-color: #b9c6d2; }
+.era-filter button.active { background: #2b87c0; border-color: #2b87c0; color: #fff; }
+.relic-count { font-size: 13px; color: #6b7a89; }
+.relic-refresh {
+  margin-left: auto; padding: 6px 16px; font-size: 13px; cursor: pointer;
+  border: 1px solid #d3dde5; background: #fff; color: #2a3440; border-radius: 8px;
+}
+.relic-refresh:hover { border-color: #b9c6d2; }
+.relic-refresh:disabled { opacity: .55; cursor: default; }
+.relic-meta { font-size: 12px; color: #98a5b1; margin-top: 8px; }
+#relic-status { margin: 10px 0 0; font-size: 14px; color: #d64541; min-height: 18px; }
+.relic-table td { vertical-align: top; }
+.relic-table th:first-child, .relic-table td:first-child { width: 48px; text-align: center; }
+.relic-era-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 12px; font-weight: 500; white-space: nowrap;
+}
+.era-lith { background: #fdf3dd; color: #a06a00; }
+.era-meso { background: #eaf3fa; color: #1d6fa5; }
+.era-neo { background: #e7f4ec; color: #2e7d4f; }
+.era-axi { background: #fbeae8; color: #c14b40; }
+.era-baro { background: #eaf3fa; color: #1d6fa5; margin-left: 6px; }
+.fav-btn {
+  background: none; border: none; cursor: pointer; font-size: 17px;
+  color: #b9c6d2; line-height: 1; padding: 2px 4px;
+}
+.fav-btn:hover { color: #b07d1a; }
+tbody tr.fav, tbody tr.fav:hover {
+  background: #fffaf0;
+  box-shadow: inset 3px 0 0 #b07d1a;
+}
+tbody tr.fav .fav-btn { color: #b07d1a; }
+.drop-list { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.drop-chip { font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+.rar { padding: 1px 6px; border-radius: 3px; font-size: 12px; }
+.rar-rare { background: #fdf3dd; color: #a06a00; }
+.rar-uncommon { background: #eaf3fa; color: #1d6fa5; }
+.rar-common { background: #eef2f6; color: #6b7a89; }
+.empty-tip { padding: 28px 0; text-align: center; color: #98a5b1; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -291,6 +341,12 @@ td.rank-no { color: #8a97a5; }
       <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
     </svg>
     物品查询
+  </div>
+  <div class="nav-item" id="nav-relics">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+      <path d="M12 2l8.5 5v10L12 22 3.5 17V7L12 2z"/><path d="M3.5 7L12 12l8.5-5M12 12v10"/>
+    </svg>
+    未入库遗物查询
   </div>
   <div class="nav-section">查询场景</div>
   <div id="scene-list"></div>
@@ -370,6 +426,37 @@ td.rank-no { color: #8a97a5; }
         </div>
       </div>
     </section>
+    <section id="view-relics" class="view hidden">
+      <h1>未入库遗物查询</h1>
+      <p class="sub">当前未入库（可在任务中获取）与虚空商人遗物 · 数据来源：灰机wiki</p>
+      <div class="relic-toolbar">
+        <div class="era-filter" id="era-filter">
+          <button data-era="all" class="active">全部</button>
+          <button data-era="古纪">古纪</button>
+          <button data-era="前纪">前纪</button>
+          <button data-era="中纪">中纪</button>
+          <button data-era="后纪">后纪</button>
+        </div>
+        <span id="era-count" class="relic-count"></span>
+        <button id="relic-refresh" class="relic-refresh" title="从灰机wiki重新抓取遗物数据">更新数据</button>
+      </div>
+      <p id="relic-meta" class="relic-meta"></p>
+      <p id="relic-status"></p>
+      <div class="scene-card">
+        <table class="relic-table">
+          <thead>
+            <tr>
+              <th title="收藏后整行高亮并置顶">收藏</th>
+              <th>遗物</th>
+              <th>纪元</th>
+              <th>掉落物品</th>
+            </tr>
+          </thead>
+          <tbody id="relic-rows"></tbody>
+        </table>
+      </div>
+      <p id="relic-empty" class="empty-tip hidden">没有符合条件的未入库遗物</p>
+    </section>
   </main>
 </div>
 <div id="modal-mask" class="modal-mask hidden">
@@ -426,6 +513,7 @@ function escapeHtml(s) {
 // ---- 侧边导航与查询场景 ----
 const addSceneBtn = $('add-scene'), sceneListBox = $('scene-list'),
       navQuery = $('nav-query'), viewQuery = $('view-query'), viewScene = $('view-scene'),
+      navRelics = $('nav-relics'), viewRelics = $('view-relics'),
       sceneTitle = $('scene-title'),
       modalMask = $('modal-mask'), modalText = $('modal-text'),
       modalInput = $('modal-input'), modalOk = $('modal-ok'), modalCancel = $('modal-cancel');
@@ -474,7 +562,9 @@ function switchToQuery() {
   sceneData = null;
   viewQuery.classList.remove('hidden');
   viewScene.classList.add('hidden');
+  viewRelics.classList.add('hidden');
   navQuery.classList.add('active');
+  navRelics.classList.remove('active');
   document.querySelector('main').classList.remove('wide');
   renderScenes();
 }
@@ -484,7 +574,9 @@ async function switchToScene(scene) {
   activeSceneId = scene.id;
   viewQuery.classList.add('hidden');
   viewScene.classList.remove('hidden');
+  viewRelics.classList.add('hidden');
   navQuery.classList.remove('active');
+  navRelics.classList.remove('active');
   document.querySelector('main').classList.add('wide');
   sceneTitle.value = scene.name;
   renderScenes();
@@ -1699,6 +1791,129 @@ async function query(name) {
     goBtn.disabled = false;
   }
 }
+
+// ---- 未入库遗物查询 ----
+const relicRows = $('relic-rows'), relicCount = $('era-count'),
+      relicMeta = $('relic-meta'), relicStatus = $('relic-status'),
+      relicEmpty = $('relic-empty'), relicRefreshBtn = $('relic-refresh'),
+      eraFilterBox = $('era-filter');
+
+const RELIC_ERA_CLASS = { '古纪': 'era-lith', '前纪': 'era-meso', '中纪': 'era-neo', '后纪': 'era-axi' };
+const RELIC_ERA_ORDER = { '古纪': 0, '前纪': 1, '中纪': 2, '后纪': 3 };
+const RELIC_RARITY_CLASS = { '稀有': 'rar-rare', '罕见': 'rar-uncommon', '常见': 'rar-common' };
+
+let relicCache = null;    // 后端返回的 { fetched_at, relics }
+let relicLoaded = false;  // 本次会话是否已加载过（懒加载）
+let relicEra = 'all';     // 当前纪元筛选
+
+// 收藏状态持久化在 localStorage
+let relicFavs;
+try {
+  relicFavs = new Set(JSON.parse(localStorage.getItem('wmq_relic_favs') || '[]'));
+} catch (e) {
+  relicFavs = new Set();
+}
+
+function saveRelicFavs() {
+  localStorage.setItem('wmq_relic_favs', JSON.stringify([...relicFavs]));
+}
+
+function renderRelics() {
+  if (!relicCache) return;
+
+  const list = relicCache.relics
+    .filter(r => relicEra === 'all' || r.era === relicEra)
+    // 收藏行置顶，其余按纪元 → 编号排序
+    .sort((a, b) =>
+      (relicFavs.has(b.name) - relicFavs.has(a.name)) ||
+      (RELIC_ERA_ORDER[a.era] - RELIC_ERA_ORDER[b.era]) ||
+      a.code.localeCompare(b.code));
+
+  relicCount.textContent = `共 ${list.length} 个未入库遗物`;
+  relicEmpty.classList.toggle('hidden', list.length > 0);
+
+  relicRows.innerHTML = list.map(r => {
+    const fav = relicFavs.has(r.name);
+    const drops = r.drops.map(d =>
+      `<span class="drop-chip"><span class="rar ${RELIC_RARITY_CLASS[d.rarity] || ''}">${d.rarity}</span>${escapeHtml(d.name)}</span>`
+    ).join('');
+    const baroTag = r.status === 'baro'
+      ? '<span class="relic-era-badge era-baro" title="虚空商人轮换出售">商人</span>' : '';
+    return `<tr class="${fav ? 'fav' : ''}" data-relic="${escapeHtml(r.name)}">
+        <td><button class="fav-btn" title="收藏后整行高亮并置顶">${fav ? '★' : '☆'}</button></td>
+        <td>${escapeHtml(r.name)}${baroTag}</td>
+        <td><span class="relic-era-badge ${RELIC_ERA_CLASS[r.era] || ''}">${r.era}</span></td>
+        <td><div class="drop-list">${drops}</div></td>
+      </tr>`;
+  }).join('');
+}
+
+async function loadRelics(force) {
+  relicStatus.textContent = '';
+
+  if (force) {
+    relicRefreshBtn.disabled = true;
+    relicRefreshBtn.textContent = '更新中…';
+  }
+
+  try {
+    const res = await fetch('/api/relics' + (force ? '/update' : ''),
+                            { method: force ? 'POST' : 'GET' });
+    const data = await res.json();
+
+    if (!res.ok) {
+      relicStatus.textContent = data.error || '加载失败，请稍后重试';
+      return;
+    }
+
+    relicCache = data;
+    relicLoaded = true;
+    relicMeta.textContent = '数据更新于 ' +
+      new Date(data.fetched_at * 1000).toLocaleString('zh-CN', { hour12: false }) +
+      ' · 来源：灰机wiki';
+    renderRelics();
+  } catch (e) {
+    relicStatus.textContent = '网络请求失败，请稍后重试';
+  } finally {
+    relicRefreshBtn.disabled = false;
+    relicRefreshBtn.textContent = '更新数据';
+  }
+}
+
+function switchToRelics() {
+  flushSceneSave();
+  activeSceneId = null;
+  sceneData = null;
+  viewQuery.classList.add('hidden');
+  viewScene.classList.add('hidden');
+  viewRelics.classList.remove('hidden');
+  navQuery.classList.remove('active');
+  navRelics.classList.add('active');
+  document.querySelector('main').classList.remove('wide');
+  renderScenes();
+  if (!relicLoaded) loadRelics(false);  // 首次进入时懒加载
+}
+
+navRelics.addEventListener('click', switchToRelics);
+
+relicRows.addEventListener('click', e => {
+  const btn = e.target.closest('.fav-btn');
+  if (!btn) return;
+  const name = btn.closest('tr').dataset.relic;
+  if (relicFavs.has(name)) relicFavs.delete(name); else relicFavs.add(name);
+  saveRelicFavs();
+  renderRelics();
+});
+
+eraFilterBox.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-era]');
+  if (!btn) return;
+  relicEra = btn.dataset.era;
+  eraFilterBox.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+  renderRelics();
+});
+
+relicRefreshBtn.addEventListener('click', () => loadRelics(true));
 </script>
 </body>
 </html>
