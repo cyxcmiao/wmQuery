@@ -302,7 +302,8 @@ td.rank-no { color: #8a97a5; }
 .relic-meta { font-size: 12px; color: #98a5b1; margin-top: 8px; }
 #relic-status { margin: 10px 0 0; font-size: 14px; color: #d64541; min-height: 18px; }
 .relic-table td { vertical-align: top; }
-.relic-table th:first-child, .relic-table td:first-child { width: 48px; text-align: center; }
+.relic-table th { white-space: nowrap; }
+.relic-table th:first-child, .relic-table td:first-child { width: 64px; text-align: center; }
 .relic-era-badge {
   display: inline-block; padding: 2px 8px; border-radius: 4px;
   font-size: 12px; font-weight: 500; white-space: nowrap;
@@ -322,8 +323,15 @@ tbody tr.fav, tbody tr.fav:hover {
   box-shadow: inset 3px 0 0 #b07d1a;
 }
 tbody tr.fav .fav-btn { color: #b07d1a; }
-.drop-list { display: flex; flex-wrap: wrap; gap: 6px 12px; }
-.drop-chip { font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+.drop-group { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.drop-item {
+  font-size: 13px; padding: 2px 10px; border-radius: 4px;
+  background: #f2f5f8; border: 1px solid #e2e8ee;
+}
+/* 每个稀有度组内的物品用同色系浅底，跟稀有度标签呼应又互相区分 */
+.drop-g-rare .drop-item     { background: #fdf6e7; border-color: #eeddb0; }
+.drop-g-uncommon .drop-item { background: #eef5fb; border-color: #d3e3f0; }
+.drop-g-common .drop-item   { background: #f0f3f6; border-color: #e0e6ec; }
 .rar { padding: 1px 6px; border-radius: 3px; font-size: 12px; }
 .rar-rare { background: #fdf3dd; color: #a06a00; }
 .rar-uncommon { background: #eaf3fa; color: #1d6fa5; }
@@ -428,7 +436,7 @@ tbody tr.fav .fav-btn { color: #b07d1a; }
     </section>
     <section id="view-relics" class="view hidden">
       <h1>未入库遗物查询</h1>
-      <p class="sub">当前未入库（可在任务中获取）与虚空商人遗物 · 数据来源：灰机wiki</p>
+      <p class="sub">当前未入库（可在任务中获取）与虚空商人遗物 · 数据来自灰机wiki存档（relic 文件夹）</p>
       <div class="relic-toolbar">
         <div class="era-filter" id="era-filter">
           <button data-era="all" class="active">全部</button>
@@ -438,7 +446,7 @@ tbody tr.fav .fav-btn { color: #b07d1a; }
           <button data-era="后纪">后纪</button>
         </div>
         <span id="era-count" class="relic-count"></span>
-        <button id="relic-refresh" class="relic-refresh" title="从灰机wiki重新抓取遗物数据">更新数据</button>
+        <button id="relic-refresh" class="relic-refresh" title="重新解析 relic/relic.html 存档">更新数据</button>
       </div>
       <p id="relic-meta" class="relic-meta"></p>
       <p id="relic-status"></p>
@@ -1801,6 +1809,7 @@ const relicRows = $('relic-rows'), relicCount = $('era-count'),
 const RELIC_ERA_CLASS = { '古纪': 'era-lith', '前纪': 'era-meso', '中纪': 'era-neo', '后纪': 'era-axi' };
 const RELIC_ERA_ORDER = { '古纪': 0, '前纪': 1, '中纪': 2, '后纪': 3 };
 const RELIC_RARITY_CLASS = { '稀有': 'rar-rare', '罕见': 'rar-uncommon', '常见': 'rar-common' };
+const RELIC_GROUP_CLASS = { '稀有': 'drop-g-rare', '罕见': 'drop-g-uncommon', '常见': 'drop-g-common' };
 
 let relicCache = null;    // 后端返回的 { fetched_at, relics }
 let relicLoaded = false;  // 本次会话是否已加载过（懒加载）
@@ -1818,32 +1827,52 @@ function saveRelicFavs() {
   localStorage.setItem('wmq_relic_favs', JSON.stringify([...relicFavs]));
 }
 
+// 遗物编号拆成 字母 + 数字（A13 -> ['A', 13]），保证数字按数值大小排
+function relicCodeKey(code) {
+  const m = code.match(/^([A-Z]+)(\d+)$/);
+  return m ? [m[1], parseInt(m[2], 10)] : [code, 0];
+}
+
 function renderRelics() {
   if (!relicCache) return;
 
+  // 分组排序：普通(收藏→未收藏) 在上，商人遗物统一在最下面；组内按 字母→数字
+  const key = r => [
+    r.status === 'baro' ? 1 : 0,
+    relicFavs.has(r.name) ? 0 : 1,
+    ...relicCodeKey(r.code),
+    RELIC_ERA_ORDER[r.era],  // 编号相同的最后按纪元
+  ];
   const list = relicCache.relics
     .filter(r => relicEra === 'all' || r.era === relicEra)
-    // 收藏行置顶，其余按纪元 → 编号排序
-    .sort((a, b) =>
-      (relicFavs.has(b.name) - relicFavs.has(a.name)) ||
-      (RELIC_ERA_ORDER[a.era] - RELIC_ERA_ORDER[b.era]) ||
-      a.code.localeCompare(b.code));
+    .sort((a, b) => {
+      const ka = key(a), kb = key(b);
+      for (let i = 0; i < ka.length; i++) {
+        if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+      }
+      return 0;
+    });
 
   relicCount.textContent = `共 ${list.length} 个未入库遗物`;
   relicEmpty.classList.toggle('hidden', list.length > 0);
 
   relicRows.innerHTML = list.map(r => {
     const fav = relicFavs.has(r.name);
-    const drops = r.drops.map(d =>
-      `<span class="drop-chip"><span class="rar ${RELIC_RARITY_CLASS[d.rarity] || ''}">${d.rarity}</span>${escapeHtml(d.name)}</span>`
-    ).join('');
+    // 掉落物按稀有度分组，每个稀有度单独一行，行内不换行
+    const drops = ['稀有', '罕见', '常见'].map(rar => {
+      const items = r.drops.filter(d => d.rarity === rar);
+      if (!items.length) return '';
+      return `<div class="drop-group ${RELIC_GROUP_CLASS[rar]}"><span class="rar ${RELIC_RARITY_CLASS[rar]}">${rar}</span>` +
+        items.map(d => `<span class="drop-item">${escapeHtml(d.name)}</span>`).join('') +
+        '</div>';
+    }).join('');
     const baroTag = r.status === 'baro'
       ? '<span class="relic-era-badge era-baro" title="虚空商人轮换出售">商人</span>' : '';
     return `<tr class="${fav ? 'fav' : ''}" data-relic="${escapeHtml(r.name)}">
         <td><button class="fav-btn" title="收藏后整行高亮并置顶">${fav ? '★' : '☆'}</button></td>
         <td>${escapeHtml(r.name)}${baroTag}</td>
         <td><span class="relic-era-badge ${RELIC_ERA_CLASS[r.era] || ''}">${r.era}</span></td>
-        <td><div class="drop-list">${drops}</div></td>
+        <td>${drops}</td>
       </tr>`;
   }).join('');
 }
@@ -1870,7 +1899,7 @@ async function loadRelics(force) {
     relicLoaded = true;
     relicMeta.textContent = '数据更新于 ' +
       new Date(data.fetched_at * 1000).toLocaleString('zh-CN', { hour12: false }) +
-      ' · 来源：灰机wiki';
+      ' · 来源：relic/relic.html（灰机wiki页面存档）';
     renderRelics();
   } catch (e) {
     relicStatus.textContent = '网络请求失败，请稍后重试';
@@ -1889,7 +1918,7 @@ function switchToRelics() {
   viewRelics.classList.remove('hidden');
   navQuery.classList.remove('active');
   navRelics.classList.add('active');
-  document.querySelector('main').classList.remove('wide');
+  document.querySelector('main').classList.add('wide');  // 掉落物不换行需要更宽的表格
   renderScenes();
   if (!relicLoaded) loadRelics(false);  // 首次进入时懒加载
 }

@@ -1,0 +1,13 @@
+# IDE 配置
+.idea/
+
+# Python 编译缓存
+__pycache__/
+
+# 虚拟环境
+.venv/
+
+# PyInstaller 打包产物
+dist/
+build/
+*.spec

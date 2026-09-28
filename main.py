@@ -440,18 +440,16 @@ def add_history(name, prices=None, need_count=None):
 
 
 # -------------------------
-# 未入库遗物查询：数据源为灰机wiki「虚空遗物/奖励表/以奖励划分」页面
+# 未入库遗物查询：数据源为灰机wiki「虚空遗物/奖励表/以奖励划分」页面的本地 HTML 存档
+# （灰机wiki有 Cloudflare 防护，程序直连会被 403，因此在浏览器 Ctrl+U 查看源代码
+#   全选另存为 relic/relic.html；缺样式不影响解析，只读取其中的表格数据）
 # 一次解析同时得到：遗物入库状态（未入库/已入库/虚空商人）+ 掉落物 + 稀有度（全中文）
-# 版本更新慢，采用手动更新：页面加载只读本地缓存，点「更新数据」按钮才联网抓取
+# 版本更新慢，采用手动更新：页面加载只读本地缓存，点「更新数据」按钮才重新解析存档
 # -------------------------
 
 RELICS_CACHE_FILE = os.path.join(CACHE_DIR, "relics_cache.json")
 RELICS_CACHE_VERSION = 1
-RELIC_WIKI_URL = (
-    "https://warframe.huijiwiki.com/wiki/"
-    "%E8%99%9A%E7%A9%BA%E9%81%97%E7%89%A9/%E5%A5%96%E5%8A%B1%E8%A1%A8/"
-    "%E4%BB%A5%E5%A5%96%E5%8A%B1%E5%88%92%E5%88%86"
-)
+RELIC_HTML_FILE = os.path.join(BASE_DIR, "relic", "relic.html")  # 灰机wiki页面源代码存档（Ctrl+U 另存）
 RELIC_ERAS = ("古纪", "前纪", "中纪", "后纪")  # 只收录四个纪元，安魂遗物天然被排除
 RELIC_RARITY_ZH = {"rare": "稀有", "uncommon": "罕见", "common": "常见"}
 RELIC_RARITY_ORDER = {"稀有": 0, "罕见": 1, "常见": 2}
@@ -558,35 +556,40 @@ def save_relics_cache(relics):
         )
 
 
-def fetch_relics_from_wiki():
-    """抓取并解析灰机wiki奖励表页面，返回全部遗物列表"""
+def read_relic_html(path):
+    """读取页面存档，返回网页 HTML 文本"""
 
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/126.0.0.0 Safari/537.36"),
-        "Accept-Language": "zh-CN,zh;q=0.9",
-    }
+    raw = open(path, "rb").read()
+    if not raw:
+        raise RuntimeError("relic.html 是空的，请重新保存页面")
 
-    try:
-        resp = SESSION.get(RELIC_WIKI_URL, headers=headers, timeout=60)
-    except requests.RequestException as e:
-        raise RuntimeError(f"连接灰机wiki失败：{e.__class__.__name__}，请检查网络后重试")
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"灰机wiki返回异常状态 {resp.status_code}，请稍后重试")
+    return raw.decode("utf-8", errors="replace")
 
-    html = resp.text
 
-    if "Just a moment" in html[:2000] or "challenges.cloudflare" in html[:2000]:
-        raise RuntimeError("灰机wiki触发了访问验证，请稍后重试")
+def refresh_relics_from_archive():
+    """从 relic/relic.html 重建遗物列表，返回 (存档修改时间, 全部遗物列表)"""
 
+    if not os.path.isfile(RELIC_HTML_FILE):
+        raise RuntimeError(
+            "没有找到 relic 文件夹下的 relic.html，"
+            "请在灰机wiki奖励表页面 Ctrl+U 查看源代码，全选另存为 relic/relic.html"
+        )
+
+    html = read_relic_html(RELIC_HTML_FILE)
     relics = parse_relic_page(html)
 
     if not relics:
-        raise RuntimeError("解析灰机wiki页面得到 0 个遗物，页面结构可能已变化，请反馈排查")
+        raise RuntimeError(
+            "解析 relic.html 得到 0 个遗物，文件内容可能不完整（比如保存的是验证页），请重新保存后重试"
+        )
 
-    return relics
+    return os.path.getmtime(RELIC_HTML_FILE), relics
 
 
 def relics_view_payload(fetched_at, relics):
@@ -617,16 +620,16 @@ def api_relics():
 
 @app.route("/api/relics/update", methods=["POST"])
 def api_relics_update():
-    """手动更新：联网抓取灰机wiki并重建本地缓存"""
+    """手动更新：重新解析 relic/ 目录里最新的页面存档并重建本地缓存"""
 
     try:
-        relics = fetch_relics_from_wiki()
+        fetched_at, relics = refresh_relics_from_archive()
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
     save_relics_cache(relics)
 
-    return jsonify(relics_view_payload(time.time(), relics))
+    return jsonify(relics_view_payload(fetched_at, relics))
 
 
 @app.route("/")
