@@ -33,17 +33,27 @@ else:
 
 
 def seed_bundled_data():
-    """打包版首次运行：把内嵌的 cache/、relic/、items_cache.json 释放到 exe 同目录
+    """打包版仅首次运行：把内嵌的 cache/、relic/、items_cache.json 释放到 exe 同目录
 
-    只复制 exe 旁缺失的文件，已有文件不覆盖，保证用户的数据和手动更新不丢失。
-    之后程序统一读写 exe 同目录（BASE_DIR），_MEIPASS 只做初始数据源。
+    用 exe 同目录下的 .seed_done 标记文件判断是否已释放过：
+    释放过一次后不再重复，用户删掉的场景文件不会被「复原」，做到真正持久化；
+    老版本升级上来的本地已有 cache/，视为已释放，只补写标记不再复制。
+    之后程序统一读写 exe 同目录（BASE_DIR），_MEIPASS 只做首次的数据源。
     """
 
     if not getattr(sys, "frozen", False):
         return
 
+    if os.path.exists(SEED_MARKER):
+        return  # 已释放过，不再触碰用户目录（含被用户删掉的文件）
+
     try:
-        # 目录类：整树按需释放（cache 下含历史、场景，relic 下含 wiki 页面存档）
+        # 升级场景：本地已有数据目录，说明不是首次运行，只补标记不复制
+        if os.path.isdir(os.path.join(BASE_DIR, "cache")):
+            open(SEED_MARKER, "w").close()
+            return
+
+        # 目录类：整树释放（cache 下含历史、场景，relic 下含 wiki 页面存档）
         for folder in ("cache", "relic"):
             src_root = os.path.join(RESOURCE_DIR, folder)
             if not os.path.isdir(src_root):
@@ -66,8 +76,15 @@ def seed_bundled_data():
         if os.path.isfile(bundled_items) and not os.path.exists(CACHE_FILE):
             shutil.copyfile(bundled_items, CACHE_FILE)
 
+        # 写标记：本次释放完成后，后续运行不再重新释放
+        open(SEED_MARKER, "w").close()
+
     except OSError:
         pass  # exe 所在目录不可写时跳过，运行中会按需重新生成数据
+
+
+# 首次释放标记文件（与 exe 同目录，删除它会重新触发一次释放）
+SEED_MARKER = os.path.join(BASE_DIR, ".seed_done")
 
 
 HEADERS = {

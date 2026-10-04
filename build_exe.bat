@@ -7,12 +7,14 @@ REM  no Python environment needed on their side.
 REM
 REM  Bundled into the exe:
 REM    index.html        (web page)
-REM    cache/            (query history, scenes, relics cache)
+REM    cache/            (scenes etc., from build_stage\cache, staged by
+REM                       stage_cache.py; emoji test scene file excluded)
 REM    relic/            (wiki page archive for relic lookup)
 REM    items_cache.json  (item list cache, pre-warmed data)
-REM  On first run the exe extracts cache/, relic/, items_cache.json
-REM  next to itself (existing files are never overwritten), then
-REM  all reads/writes happen next to the exe and persist.
+REM  The exe extracts cache/, relic/, items_cache.json next to itself
+REM  ONLY on first run (marker file .seed_done), later runs never
+REM  re-seed, so deleted scene files stay deleted (true persistence).
+REM  To refresh bundled data again, delete .seed_done next to the exe.
 REM
 REM  NOTE: keep this file pure ASCII with CRLF line endings.
 REM  Chinese chars or "chcp 65001" break cmd parsing on zh-CN Windows.
@@ -24,7 +26,7 @@ REM Prefer project venv python, fall back to system python
 set "PY=.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
-echo [1/3] Checking PyInstaller...
+echo [1/4] Checking PyInstaller...
 "%PY%" -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
     echo PyInstaller not found, installing from mirror...
@@ -38,10 +40,20 @@ if errorlevel 1 (
 )
 
 echo.
-echo [2/3] Building dist\wmQuery.exe ...
+echo [2/4] Staging cache folder (drop emoji test scene)...
+"%PY%" stage_cache.py
+if errorlevel 1 (
+    echo.
+    echo FAILED to stage cache. See message above.
+    pause
+    exit /b 1
+)
+
+echo.
+echo [3/4] Building dist\wmQuery.exe ...
 "%PY%" -m PyInstaller --onefile --noconfirm --clean --name wmQuery ^
     --add-data=index.html:. ^
-    --add-data=cache:cache ^
+    --add-data=build_stage/cache:cache ^
     --add-data=relic:relic ^
     --add-data=items_cache.json:. ^
     main.py
@@ -54,7 +66,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] Build OK.
+echo [4/4] Build OK.
 echo   Output : dist\wmQuery.exe
 echo   Share  : copy this single exe to users, double-click to run.
 echo   Tip    : to update bundled data, refresh it in dev mode then
