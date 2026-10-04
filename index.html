@@ -1331,20 +1331,16 @@ addRowBtn.addEventListener('click', () => {
   scheduleSceneSave();
 });
 
-// ---- 期望价格、白金/十万声望列排序：单击循环 默认 -> 正序 -> 倒序 ----
-let sceneSort = null;  // null 为默认顺序，否则 { key, dir: 1|-1 }
+// ---- 期望价格、白金/十万声望列排序：单击循环 默认 -> 降序 ----
+let sceneSort = null;  // null 为默认顺序，否则 { key, dir: -1 }
 
 document.querySelectorAll('.scene-table th.sortable').forEach(th => {
   th.addEventListener('click', () => {
     const key = th.dataset.sort;
 
-    // 白金/十万声望列第一次点击先降序，其他列先正序；再点反向，第三次恢复默认顺序
-    const startDir = key === 'ptm' ? -1 : 1;
-
+    // 第一次点击降序，再点恢复默认顺序（不提供升序）
     if (!sceneSort || sceneSort.key !== key) {
-      sceneSort = { key, dir: startDir };
-    } else if (sceneSort.dir === startDir) {
-      sceneSort.dir = -startDir;
+      sceneSort = { key, dir: -1 };
     } else {
       sceneSort = null;
     }
