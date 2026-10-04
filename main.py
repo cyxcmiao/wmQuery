@@ -13,6 +13,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime, timedelta, timezone
+from html import unescape as _html_unescape
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -432,82 +433,88 @@ def add_history(name, prices=None, need_count=None):
 
 
 # -------------------------
-# 未入库遗物查询：数据源为灰机wiki「虚空遗物/奖励表/以奖励划分」页面的本地 HTML 存档
-# （灰机wiki有 Cloudflare 防护，程序直连会被 403，因此在浏览器 Ctrl+U 查看源代码
-#   全选另存为 relic/relic.html；缺样式不影响解析，只读取其中的表格数据）
-# 一次解析同时得到：遗物入库状态（未入库/已入库/虚空商人）+ 掉落物 + 稀有度（全中文）
+# 未入库遗物查询：数据源为官方wiki「Void Relic/ByRelic」页面的本地 HTML 存档
+# https://wiki.warframe.com/w/Void_Relic/ByRelic
+# （该站有 Cloudflare 防护，程序直连会被 403，因此在浏览器打开页面 Ctrl+S 保存为
+#   relic/Void Relic_ByRelic - WARFRAME Wiki.html；缺样式不影响解析，只读取表格数据）
+# 一次解析同时得到：遗物入库状态（未入库/已入库）+ 掉落物 + 稀有度
+#   注意：官方页面按 Tier/Name/Exclusivity/Common/Uncommon/Rare 六列组织，
+#   掉落物与稀有度由所在列决定，页面原始掉落名为英文；
+#   前端展示前会按物品缓存（items_cache.json）翻译成中文，见 build_drop_translator；
+#   页面不标注虚空商人遗物，因此 status 只会有 active/vaulted，不再产生 baro
 # 版本更新慢，采用手动更新：页面加载只读本地缓存，点「更新数据」按钮才重新解析存档
 # -------------------------
 
 RELICS_CACHE_FILE = os.path.join(CACHE_DIR, "relics_cache.json")
-RELICS_CACHE_VERSION = 1
-RELIC_HTML_FILE = os.path.join(BASE_DIR, "relic", "relic.html")  # 灰机wiki页面源代码存档（Ctrl+U 另存）
-RELIC_ERAS = ("古纪", "前纪", "中纪", "后纪")  # 只收录四个纪元，安魂遗物天然被排除
-RELIC_RARITY_ZH = {"rare": "稀有", "uncommon": "罕见", "common": "常见"}
+RELICS_CACHE_VERSION = 2
+RELIC_HTML_FILE = os.path.join(
+    BASE_DIR, "relic", "Void Relic_ByRelic - WARFRAME Wiki.html")  # 官方wiki页面存档（Ctrl+S 保存）
+RELIC_ERAS = ("古纪", "前纪", "中纪", "后纪")  # 只收录四个纪元，Requiem/Vanguard 等天然被排除
 RELIC_RARITY_ORDER = {"稀有": 0, "罕见": 1, "常见": 2}
 
-# 徽章结构：<span [title="该遗物已入库|该遗物为虚空商人遗物"]
-#          class="label label-success|disable|primary label-relic">古纪 L8 <span class="label-relic-rare"
-_RELIC_BADGE_RE = re.compile(
-    r'<span(?: title="(?P<title>[^"]*)")? class="label label-(?P<cls>\w+) label-relic">'
-    r"(?P<era>古纪|前纪|中纪|后纪) (?P<code>[A-Z]+\d+) "
-    r'<span class="label-relic-(?P<rarity>\w+)"'
-)
+# 官方wiki纪元名 → 中文纪元名
+RELIC_ERA_ZH = {"Lith": "古纪", "Meso": "前纪", "Neo": "中纪", "Axi": "后纪"}
 
-# 行结构：物品单元格可能带 rowspan（跨多行），部件单元格固定 width="25%"
-_RELIC_ROW_SPLIT_RE = re.compile(r'<tr class="filter-div--item"')
-_RELIC_ITEM_CELL_RE = re.compile(r'<td rowspan="\d+" width="25%">.*?title="[^"]*">([^<]+)</a>', re.S)
-_RELIC_PART_CELL_RE = re.compile(r'<td width="25%">([^<]+)</td>')
+# 行结构：<tr>
+#   <td>Axi</td>
+#   <td><a href="/w/Axi_V12" title="Axi V12">Axi V12</a></td>
+#   <td><a href="/w/Prime_Vault" ...>Vaulted</a> 或 –（未入库）</td>
+#   <td><ul><li><a ...>Zylok Prime Barrel</a></li>...</ul></td>  ×3（Common/Uncommon/Rare）
+_RELIC_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+_RELIC_CELL_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+_RELIC_LI_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.S)
+_RELIC_TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _relic_badge_status(cls, title):
-    """根据徽章 class 与 title 判定遗物状态：active=未入库 baro=虚空商人 vaulted=已入库"""
+def _relic_cell_text(cell_html):
+    """单元格 HTML → 纯文本（去标签、反转义 HTML 实体、合并空白）"""
 
-    if title == "该遗物为虚空商人遗物":
-        return "baro"
-    if title == "该遗物已入库" or cls == "disable":
-        return "vaulted"
-    return "active"
+    text = re.sub(r"\s+", " ", _RELIC_TAG_RE.sub("", cell_html)).strip()
+    return _html_unescape(text)
 
 
 def parse_relic_page(html):
-    """解析奖励表页面 HTML，返回全部遗物列表
+    """解析 ByRelic 页面 HTML，返回全部遗物列表
 
     每个遗物：{name, era, code, status, drops: [{name, rarity}]}
-    drops 已按部件去重，稀有度统一为中文。
+    drops 按所在列确定稀有度（Rare/Uncommon/Common → 稀有/罕见/常见）。
     """
 
     relics = {}
-    current_item = ""
 
-    # 物品名在 rowspan 单元格里，跨行复用；先全局按行切分再逐行提取
-    for row in _RELIC_ROW_SPLIT_RE.split(html)[1:]:
-        row = row.split("</tr>")[0]
+    for row_html in _RELIC_ROW_RE.findall(html):
+        cells = _RELIC_CELL_RE.findall(row_html)
+        if len(cells) != 6:
+            continue  # 表头行或其他无关表格
 
-        # rowspan 物品单元格一定是行内第一个 td（行首是 tr 属性），用 search 匹配
-        item_m = _RELIC_ITEM_CELL_RE.search(row)
-        if item_m:
-            current_item = item_m.group(1).strip()
+        era_en = _relic_cell_text(cells[0])
+        era = RELIC_ERA_ZH.get(era_en)
+        if era is None:
+            continue  # Requiem / Vanguard 等不入库纪元
 
-        part_m = _RELIC_PART_CELL_RE.search(row)
-        if not part_m:
-            continue
-        part = part_m.group(1).strip()
+        name = _relic_cell_text(cells[1])
+        code_m = re.match(rf"^{era_en}\s+(\S+)$", name)
+        if not code_m:
+            continue  # 名称与纪元对不上，按脏数据跳过
+        code = code_m.group(1)
 
-        for m in _RELIC_BADGE_RE.finditer(row):
-            status = _relic_badge_status(m.group("cls"), m.group("title"))
-            key = (m.group("era"), m.group("code"))
-            relic = relics.setdefault(key, {
-                "name": f"{key[0]} {key[1]}",
-                "era": key[0],
-                "code": key[1],
-                "status": status,
-                "drops": [],
-            })
-            drop = {"name": f"{current_item} {part}".strip(),
-                    "rarity": RELIC_RARITY_ZH.get(m.group("rarity"), m.group("rarity"))}
-            if drop not in relic["drops"]:
-                relic["drops"].append(drop)
+        exclusivity = _relic_cell_text(cells[2])
+        status = "vaulted" if "Vaulted" in exclusivity else "active"
+
+        relic = relics.setdefault((era, code), {
+            "name": f"{era} {code}",
+            "era": era,
+            "code": code,
+            "status": status,
+            "drops": [],
+        })
+
+        # 第4~6列依次为 Common/Uncommon/Rare 掉落
+        for cell_html, rarity in zip(cells[3:6], ("常见", "罕见", "稀有")):
+            for li_html in _RELIC_LI_RE.findall(cell_html):
+                drop_name = _relic_cell_text(li_html)
+                if drop_name and {"name": drop_name, "rarity": rarity} not in relic["drops"]:
+                    relic["drops"].append({"name": drop_name, "rarity": rarity})
 
     result = list(relics.values())
 
@@ -516,6 +523,39 @@ def parse_relic_page(html):
         relic["drops"].sort(key=lambda d: RELIC_RARITY_ORDER.get(d["rarity"], 9))
 
     return result
+
+
+# 掉落物英文名 → 中文名：直接按整体名称查物品缓存（部件在 wm 是独立条目，名称可直接命中），
+# 查不到时做单复数回退与「蓝图」拆分回退；Forma 按要求保留英文不翻译
+
+def build_drop_translator():
+    """根据物品缓存构建掉落物名称翻译函数，缓存不可用时返回恒等函数（展示英文原名）"""
+
+    items = load_items_cache()
+    if not items:
+        return lambda name: name
+
+    en2zh = {}
+    for item in items:
+        i18n = item.get("i18n", {})
+        en_name = (i18n.get("en") or {}).get("name")
+        zh_name = (i18n.get("zh-hans") or {}).get("name")
+        if en_name and zh_name:
+            en2zh[en_name] = zh_name
+
+    def translate(name):
+        zh = en2zh.get(name)
+        if zh:
+            return zh
+        if name + "s" in en2zh:  # 单复数差异，如 Carrier Prime System → Systems
+            return en2zh[name + "s"]
+        if name.endswith(" Blueprint"):  # 「XXX Blueprint」= XXX 物品 + 蓝图（Forma 不在缓存里，自然保留英文）
+            base = en2zh.get(name[: -len(" Blueprint")])
+            if base:
+                return f"{base} 蓝图"
+        return name
+
+    return translate
 
 
 def load_relics_cache():
@@ -553,7 +593,7 @@ def read_relic_html(path):
 
     raw = open(path, "rb").read()
     if not raw:
-        raise RuntimeError("relic.html 是空的，请重新保存页面")
+        raise RuntimeError("页面存档是空的，请重新保存")
 
     for encoding in ("utf-8", "gbk"):
         try:
@@ -565,12 +605,12 @@ def read_relic_html(path):
 
 
 def refresh_relics_from_archive():
-    """从 relic/relic.html 重建遗物列表，返回 (存档修改时间, 全部遗物列表)"""
+    """解析 relic/ 里的页面存档，返回 (存档修改时间, 全部遗物列表)"""
 
     if not os.path.isfile(RELIC_HTML_FILE):
         raise RuntimeError(
-            "没有找到 relic 文件夹下的 relic.html，"
-            "请在灰机wiki奖励表页面 Ctrl+U 查看源代码，全选另存为 relic/relic.html"
+            "没有找到 relic 文件夹下的「Void Relic_ByRelic - WARFRAME Wiki.html」，"
+            "请在浏览器打开 wiki.warframe.com/w/Void_Relic/ByRelic 后 Ctrl+S 保存到 relic 文件夹"
         )
 
     html = read_relic_html(RELIC_HTML_FILE)
@@ -578,18 +618,24 @@ def refresh_relics_from_archive():
 
     if not relics:
         raise RuntimeError(
-            "解析 relic.html 得到 0 个遗物，文件内容可能不完整（比如保存的是验证页），请重新保存后重试"
+            "解析页面存档得到 0 个遗物，文件内容可能不完整（比如保存的是验证页），请重新保存后重试"
         )
 
     return os.path.getmtime(RELIC_HTML_FILE), relics
 
 
 def relics_view_payload(fetched_at, relics):
-    """组装前端需要的未入库视图：未入库 + 虚空商人遗物，按纪元/编号排序"""
+    """组装前端需要的未入库视图：未入库 + 虚空商人遗物，按纪元/编号排序，掉落物翻译成中文"""
 
     era_order = {era: i for i, era in enumerate(RELIC_ERAS)}
     view = [r for r in relics if r["status"] in ("active", "baro")]
     view.sort(key=lambda r: (era_order.get(r["era"], 9), r["code"]))
+
+    translate = build_drop_translator()
+    view = [
+        {**r, "drops": [{**d, "name": translate(d["name"])} for d in r["drops"]]}
+        for r in view
+    ]
 
     return {
         "fetched_at": fetched_at,
@@ -612,7 +658,7 @@ def api_relics():
 
 @app.route("/api/relics/update", methods=["POST"])
 def api_relics_update():
-    """手动更新：重新解析 relic/ 目录里最新的页面存档并重建本地缓存"""
+    """手动更新：重新解析 relic/ 里的页面存档并重建本地缓存"""
 
     try:
         fetched_at, relics = refresh_relics_from_archive()
