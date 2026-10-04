@@ -87,8 +87,8 @@ def make_session():
 SESSION = make_session()
 
 # 物品列表本地缓存（存在脚本同目录）
+# 启动只读缓存不联网，点页面「更新数据」按钮才重新下载
 CACHE_FILE = os.path.join(BASE_DIR, "items_cache.json")
-CACHE_TTL_HOURS = 24  # 缓存有效时长（小时），超过后自动重新下载
 CACHE_VERSION = 5  # 缓存结构版本，字段变化时递增以强制刷新旧缓存
 
 # 赋能升到对应等级需要的数量（maxRank -> 个数）
@@ -108,11 +108,10 @@ WEB_DIR = RESOURCE_DIR
 app = Flask(__name__, static_folder=None)
 
 
-def load_items_cache(max_age_hours):
+def load_items_cache():
     """读取本地缓存的物品列表
 
-    :param max_age_hours: 允许的缓存最长年龄（小时），None 表示不限制年龄
-    :return: 物品列表，缓存不存在、损坏或太旧时返回 None
+    :return: 物品列表，缓存不存在、损坏或版本不同时返回 None
     """
 
     if not os.path.exists(CACHE_FILE):
@@ -125,10 +124,7 @@ def load_items_cache(max_age_hours):
         if cache.get("version") != CACHE_VERSION:
             return None  # 旧版本缓存结构不同，重新下载
 
-        age_hours = (time.time() - cache["fetched_at"]) / 3600
-
-        if max_age_hours is None or age_hours <= max_age_hours:
-            return cache["data"]
+        return cache["data"]
 
     except (OSError, KeyError, TypeError, ValueError):
         pass  # 缓存损坏时忽略，当作没有缓存
@@ -182,38 +178,34 @@ def save_items_cache(items):
         pass  # 缓存写失败不影响本次查询
 
 
-def get_all_items():
-    """获取全部物品列表（同时用于补全和查找），优先使用本地缓存"""
+def fetch_items_from_wm():
+    """从 Warframe Market 拉取全部物品列表（同时用于补全和查找）
 
-    cached = load_items_cache(CACHE_TTL_HOURS)
-
-    if cached is not None:
-        print(f"（使用本地缓存，缓存超过 {CACHE_TTL_HOURS} 小时后自动重新下载）")
-        return cached
+    成功时写入本地缓存并返回瘦身后的列表；失败时抛出异常，由调用方处理。
+    """
 
     url = f"{BASE_URL}/items"
 
-    try:
-        response = wm_get(url)
+    response = wm_get(url)
 
-        response.raise_for_status()
+    response.raise_for_status()
 
-        items = response.json()["data"]
-
-    except (requests.RequestException, ValueError):
-        # 下载失败时退回过期的缓存，保证断网也能用
-        stale = load_items_cache(None)
-
-        if stale is None:
-            raise
-
-        print("物品列表下载失败，使用过期的本地缓存")
-        return stale
+    items = response.json()["data"]
 
     save_items_cache(items)
 
-    # 返回瘦身后的列表，与"缓存命中"时的结构一致（带 arcane 标记与 maxRank）
-    return load_items_cache(None)
+    # 返回瘦身后的列表，与"读取缓存"时的结构一致（带 arcane 标记与 maxRank）
+    return load_items_cache()
+
+
+def build_name_list(items):
+    """从物品列表提取去重后的全部中文名（供输入框补全和查找提示）"""
+
+    return list(dict.fromkeys(
+        item["i18n"]["zh-hans"]["name"]
+        for item in items
+        if item.get("i18n", {}).get("zh-hans") and item["i18n"]["zh-hans"].get("name")
+    ))
 
 
 def find_item(items, chinese_name):
@@ -307,7 +299,7 @@ def get_recent_closed_avg(item_slug, need_count=None, max_rank=None):
     """取昨天/前天/大前天（UTC日期）的成交中间价
 
     :param need_count: 赋能类折算为单个价格时需要的个数，其他物品为 None
-    :param full_rank: 赋能类的满级等级；MOD 只统计0级成交，普通物品不过滤
+    :param max_rank: 赋能类的满级等级；MOD 只统计0级成交，普通物品不过滤
     :return: [a, b, c]，某天没有成交时对应位置为 None；统计查询失败也返回 [None, None, None]，
              不影响挂单价格的展示
     """
@@ -415,7 +407,7 @@ def load_history():
 def add_history(name, prices=None, need_count=None):
     """记录一次查询：同名条目移到最前并更新时间和全部价格，最多保留 HISTORY_MAX 条
 
-    :param prices: 查询结果中前5卖单的白金价格列表（低到高），没有卖单时为空列表
+    :param prices: 查询结果中前3卖单的白金价格列表（低到高），没有卖单时为空列表
     :param need_count: 赋能类升到满级需要的数量，其他物品为 None
     """
 
@@ -983,9 +975,28 @@ def api_items():
     return jsonify(NAME_LIST)
 
 
+@app.route("/api/items/update", methods=["POST"])
+def api_items_update():
+    """手动更新物品列表：重新从 Warframe Market 拉取并重建本地缓存
+
+    只在点击页面「更新数据」按钮时触发；失败时保留原有缓存和已加载数据。
+    """
+
+    global ITEMS, NAME_LIST
+
+    try:
+        ITEMS = fetch_items_from_wm() or []
+    except (requests.RequestException, ValueError):
+        return jsonify({"error": "连接 Warframe Market 失败（已自动重试），请稍后再试"}), 502
+
+    NAME_LIST = build_name_list(ITEMS)
+
+    return jsonify({"count": len(NAME_LIST)})
+
+
 @app.route("/api/query")
 def api_query():
-    """查询指定物品的游戏内最低价卖单前5"""
+    """查询指定物品的游戏内最低价卖单前3"""
 
     name = request.args.get("name", "").strip()
 
@@ -1018,8 +1029,10 @@ def api_query():
     try:
         filtered, closed = get_pricing_parallel(item["slug"], rank_groups, need_count,
                                                 max_rank if is_arcane else None)
-    except requests.RequestException:
+    except requests.RequestException as e:
         # 网络异常（含自动重试后仍失败）：返回明确错误，而不是 500 崩掉
+        # 原因打到后台窗口，方便排查 VPN/代理问题
+        print(f"[查询失败] {name}: {e!r}")
         return jsonify({
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
@@ -1104,7 +1117,10 @@ def api_price():
     try:
         filtered, closed = get_pricing_parallel(item["slug"], rank_groups, need_count,
                                                 max_rank if is_arcane else None)
-    except requests.RequestException:
+    except requests.RequestException as e:
+        # 网络异常（含自动重试后仍失败）：返回明确错误，而不是 500 崩掉
+        # 原因打到后台窗口，方便排查 VPN/代理问题
+        print(f"[查询失败] {name}: {e!r}")
         return jsonify({
             "error": "连接 Warframe Market 失败（已自动重试），请稍后再试"
         }), 502
@@ -1163,21 +1179,16 @@ def main():
 
     ensure_cache_dir()
 
-    print("正在加载物品列表...")
+    print("正在读取物品列表缓存...")
 
-    try:
-        ITEMS = get_all_items()
-    except requests.RequestException:
-        print("Warframe Market 连接失败，且没有可用的本地缓存")
-        print("请检查网络后重新运行")
-        sys.exit(1)
+    # 启动只读本地缓存，不联网；没有缓存时在页面点「更新数据」按钮获取
+    ITEMS = load_items_cache() or []
+
+    if not ITEMS:
+        print("本地没有物品缓存，启动后请在页面点击「更新数据」按钮获取")
 
     # 去重，保持原有顺序
-    NAME_LIST = list(dict.fromkeys(
-        item["i18n"]["zh-hans"]["name"]
-        for item in ITEMS
-        if item.get("i18n", {}).get("zh-hans") and item["i18n"]["zh-hans"].get("name")
-    ))
+    NAME_LIST = build_name_list(ITEMS)
 
     print(f"物品列表加载完成，共 {len(NAME_LIST)} 个物品")
 

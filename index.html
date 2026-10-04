@@ -79,10 +79,6 @@ h1 {
   font-size: 26px; color: #1c2733; letter-spacing: 1px;
   border-left: 4px solid #2b87c0; padding-left: 14px;
 }
-h2 {
-  font-size: 20px; color: #1c2733; letter-spacing: 1px;
-  border-left: 4px solid #2b87c0; padding-left: 12px;
-}
 .sub { color: #6b7a89; margin: 10px 0 28px; font-size: 14px; }
 .search-box { position: relative; display: flex; gap: 10px; }
 #search {
@@ -110,6 +106,8 @@ h2 {
 .suggest b { color: #1d6fa5; }
 .hidden { display: none !important; }
 .hint { color: #6b7a89; font-size: 13px; margin-top: 10px; }
+/* 物品查询页：提示文字与「更新数据」按钮同行 */
+.items-toolbar { display: flex; align-items: center; gap: 10px; }
 #status { margin: 22px 0 0; font-size: 14px; color: #a06a00; min-height: 20px; }
 #status.error { color: #d64541; }
 #status .sug {
@@ -364,13 +362,16 @@ tbody tr.fav .fav-btn { color: #b07d1a; }
   <main class="panel">
     <section id="view-query" class="view">
       <h1>物品查询</h1>
-      <p class="sub">游戏中玩家在售 · 最低价前 5 个卖单</p>
+      <p class="sub">游戏中玩家在售 · 最低价前 3 个卖单</p>
       <div class="search-box">
         <input id="search" placeholder="输入物品名称，如：斩铁" autocomplete="off" spellcheck="false">
         <button id="go">查询</button>
         <ul id="suggest" class="suggest hidden"></ul>
       </div>
-      <p class="hint" id="hint"></p>
+      <div class="items-toolbar">
+        <p class="hint" id="hint"></p>
+        <button id="items-update" class="update-btn" title="从 Warframe Market 重新拉取物品列表">更新数据</button>
+      </div>
       <div id="status"></div>
       <section id="result" class="hidden">
         <div class="item-head">
@@ -507,11 +508,38 @@ async function loadNames() {
   try {
     const res = await fetch('/api/items');
     names = await res.json();
-    hint.textContent = `物品列表已就绪（${names.length} 项），输入名称即可自动补全`;
+    hint.textContent = names.length
+      ? `物品列表已就绪（${names.length} 项），输入名称即可自动补全`
+      : '暂无物品数据，请点击「更新数据」从 Warframe Market 获取';
   } catch (e) {
     hint.textContent = '物品列表加载失败，请刷新页面重试';
   }
 }
+
+// ---- 手动更新物品列表（启动只读缓存，不再自动联网下载）----
+const itemsUpdateBtn = $('items-update');
+
+itemsUpdateBtn.addEventListener('click', async () => {
+  itemsUpdateBtn.disabled = true;
+  itemsUpdateBtn.textContent = '更新中…';
+  hint.textContent = '正在从 Warframe Market 拉取物品列表…';
+  try {
+    const res = await fetch('/api/items/update', { method: 'POST' });
+    const data = await res.json();
+
+    if (!res.ok) {
+      hint.textContent = data.error || '更新失败，请稍后重试';
+      return;
+    }
+
+    await loadNames();
+  } catch (e) {
+    hint.textContent = '网络请求失败，请稍后重试';
+  } finally {
+    itemsUpdateBtn.disabled = false;
+    itemsUpdateBtn.textContent = '更新数据';
+  }
+});
 
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -760,11 +788,10 @@ function formatPriceStats(closed, wmAvg, top3) {
   const avg3 = (vals.length === closed.length && closed.length > 0)
     ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length * 100) / 100
     : null;
-  const hasMissing = closed.some(v => v === null || v === undefined);
   // 三天内任一天缺失：三天平均值也按「数据缺失」显示（计算取0）；全部缺失时整行只显示「数据缺失」
   const statLine = avg3 === null
     ? (vals.length ? `数据缺失（${closed.map(v => (v === null || v === undefined) ? '数据缺失' : v).join('/')}）` : '数据缺失')
-    : `${avg3}（${closed.map(v => v).join('/')}）`;
+    : `${avg3}（${closed.join('/')}）`;
   const liveLine = (wmAvg === null || wmAvg === undefined) ? '' : `${wmAvg}（${top3.join('/')}）`;
 
   if (statLine === '数据缺失' && !liveLine) return '';
@@ -1629,7 +1656,7 @@ function fmtTime(ts) {
 }
 
 function priceText(h) {
-  // 新格式：前5卖单的全部价格，如 8/8/8/10/10；数据不够显示现有的几个，没有则提示未查询到
+  // 新格式：前3卖单的全部价格，如 8/8/10；数据不够显示现有的几个，没有则提示未查询到
   if (Array.isArray(h.prices) && h.prices.length) return h.prices.join('/');
   if (h.price != null) return String(h.price);  // 兼容只存最低价的旧格式
   return '未查询到价格';
