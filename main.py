@@ -7,7 +7,6 @@ ensure_package("flask")
 import json
 import os
 import re
-import shutil
 import socket
 import sys
 import threading
@@ -24,68 +23,12 @@ from urllib3.util.retry import Retry
 BASE_URL = "https://api.warframe.market/v2"
 
 if getattr(sys, "frozen", False):
-    # 打包成 exe 后：index.html 和初始 cache/、relic/ 等随包内嵌（_MEIPASS 临时目录），
+    # 打包成 exe 后：index.html 等资源释放到 _MEIPASS 临时目录，
     # 缓存和历史等数据文件存放在 exe 同目录，保证可持久保存
     RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def seed_bundled_data():
-    """打包版仅首次运行：把内嵌的 cache/、relic/、items_cache.json 释放到 exe 同目录
-
-    用 exe 同目录下的 .seed_done 标记文件判断是否已释放过：
-    释放过一次后不再重复，用户删掉的场景文件不会被「复原」，做到真正持久化；
-    老版本升级上来的本地已有 cache/，视为已释放，只补写标记不再复制。
-    之后程序统一读写 exe 同目录（BASE_DIR），_MEIPASS 只做首次的数据源。
-    """
-
-    if not getattr(sys, "frozen", False):
-        return
-
-    if os.path.exists(SEED_MARKER):
-        return  # 已释放过，不再触碰用户目录（含被用户删掉的文件）
-
-    try:
-        # 升级场景：本地已有数据目录，说明不是首次运行，只补标记不复制
-        if os.path.isdir(os.path.join(BASE_DIR, "cache")):
-            open(SEED_MARKER, "w").close()
-            return
-
-        # 目录类：整树释放（cache 下含历史、场景，relic 下含 wiki 页面存档）
-        for folder in ("cache", "relic"):
-            src_root = os.path.join(RESOURCE_DIR, folder)
-            if not os.path.isdir(src_root):
-                continue
-
-            for root, _dirs, files in os.walk(src_root):
-                rel_dir = os.path.relpath(root, src_root)
-                dst_dir = os.path.join(BASE_DIR, folder, rel_dir) if rel_dir != "." \
-                    else os.path.join(BASE_DIR, folder)
-
-                for file_name in files:
-                    dst_file = os.path.join(dst_dir, file_name)
-                    if os.path.exists(dst_file):
-                        continue  # 已有则不覆盖
-                    os.makedirs(dst_dir, exist_ok=True)
-                    shutil.copyfile(os.path.join(root, file_name), dst_file)
-
-        # 单文件类：物品列表缓存，释放后用户无需再手动「更新数据」
-        bundled_items = os.path.join(RESOURCE_DIR, "items_cache.json")
-        if os.path.isfile(bundled_items) and not os.path.exists(CACHE_FILE):
-            shutil.copyfile(bundled_items, CACHE_FILE)
-
-        # 写标记：本次释放完成后，后续运行不再重新释放
-        open(SEED_MARKER, "w").close()
-
-    except OSError:
-        pass  # exe 所在目录不可写时跳过，运行中会按需重新生成数据
-
-
-# 首次释放标记文件（与 exe 同目录，删除它会重新触发一次释放）
-SEED_MARKER = os.path.join(BASE_DIR, ".seed_done")
-
 
 HEADERS = {
     "Accept": "application/json",
@@ -147,10 +90,6 @@ SESSION = make_session()
 # 物品列表本地缓存（存在脚本同目录）
 # 启动只读缓存不联网，点页面「更新数据」按钮才重新下载
 CACHE_FILE = os.path.join(BASE_DIR, "items_cache.json")
-
-# 打包版：在路径常量定义完成后，再把内嵌的初始数据释放到 exe 同目录
-seed_bundled_data()
-
 CACHE_VERSION = 5  # 缓存结构版本，字段变化时递增以强制刷新旧缓存
 
 # 赋能升到对应等级需要的数量（maxRank -> 个数）
@@ -1013,6 +952,8 @@ def api_scene_save(scene_id):
                 "custom": str(row.get("custom", "")).strip()[:20],
                 # wm 为两行文本（统计数据+挂单价），放宽截断长度
                 "wm": str(row.get("wm", "")).strip()[:120],
+                # 备注为用户自定义文本，与物品名同长度限制
+                "note": str(row.get("note", "")).strip()[:100],
                 "closed": closed,
             })
 
