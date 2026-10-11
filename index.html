@@ -73,8 +73,9 @@ body.scene-dragging .scene-item { cursor: grabbing; }
   padding: 40px 24px;
 }
 .panel { width: 100%; max-width: 640px; }
-/* 场景页表格列多（9列），切换到场景时由 JS 给 main 加 wide 类放宽容器 */
-main.wide { max-width: 1200px; }
+/* 场景页表格列多（9列），切换到场景时由 JS 给 main 加 wide 类放宽容器；
+   加 wiki 按钮后操作列加宽 38px，容器同步 1200->1240 补偿，其他列宽不变 */
+main.wide { max-width: 1240px; }
 h1 {
   font-size: 26px; color: #1c2733; letter-spacing: 1px;
   border-left: 4px solid #2b87c0; padding-left: 14px;
@@ -153,7 +154,7 @@ td.rank-no { color: #8a97a5; }
   padding: 8px 8px; border-bottom: 1px solid #d3dde5;
   white-space: nowrap;
 }
-.scene-table th:last-child { width: 108px; }
+.scene-table th:last-child { width: 146px; }
 /* 名称列加宽：约为自适应时的2倍 */
 .scene-table th:first-child { width: 23%; }
 /* 可排序表头（期望价格、白金/十万声望） */
@@ -188,9 +189,12 @@ td.rank-no { color: #8a97a5; }
 .scene-table th.col-note { width: 18%; }
 .wm-display.readonly { color: #8a97a5; background: #f6f8fa; }
 .wm-display.gold-border { border-color: #b07d1a; }
-/* 操作列：单行更新 + 删除 两个按钮并排 */
+/* 操作列：wiki + 单行更新 + 删除 三个按钮并排 */
 .row-actions { display: flex; gap: 4px; }
 .row-actions button { flex: 1; padding: 5px 4px; font-size: 12px; border: none; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+/* wiki 按钮固定紧凑宽度，不参与 flex 拉伸 */
+.row-actions .row-wiki { flex: 0 0 auto; padding: 5px 8px; color: #55606c; background: #eef2f6; }
+.row-actions .row-wiki:hover { background: #dfe6ee; }
 .row-update { color: #1d6fa5; background: #e3f0f9; }
 .row-update:hover { background: #d0e7f5; }
 .row-update:disabled { color: #8a97a5; background: #f0f2f5; cursor: default; }
@@ -780,7 +784,7 @@ function sceneRowHtml(name, rate, custom, standing, note = '') {
     <td><input class="cell-input num" data-field="final" readonly></td>
     <td class="col-ptm"><input class="cell-input num" data-field="ptm" readonly></td>
     <td><input class="cell-input" data-field="note" value="${escapeHtml(note)}" maxlength="100" spellcheck="false" placeholder="自定义备注"></td>
-    <td><div class="row-actions"><button class="row-update" title="只查询本行的价格">单行更新</button><button class="row-del">删除</button></div></td>
+    <td><div class="row-actions"><button type="button" class="row-wiki" title="打开灰机Wiki页面">wiki</button><button class="row-update" title="只查询本行的价格">单行更新</button><button class="row-del">删除</button></div></td>
   </tr>`;
 }
 
@@ -1156,6 +1160,21 @@ sceneRows.addEventListener('click', async e => {
     hideCellSuggest();
     updateProfit();
     scheduleSceneSave();
+    return;
+  }
+
+  // wiki 跳转：灰机Wiki 按当前行物品名打开页面，名字里的「·」去掉（如“安柏· Prime”→“安柏 Prime”→ 链接里空格自动转义）
+  const wikiBtn = e.target.closest('.row-wiki');
+
+  if (wikiBtn) {
+    const name = wikiBtn.closest('tr').querySelector('[data-field="name"]').value.trim().replace(/·/g, '');
+
+    if (!name) {
+      showDupToast('请先输入物品名称');
+      return;
+    }
+
+    window.open('https://warframe.huijiwiki.com/wiki/' + encodeURIComponent(name), '_blank');
     return;
   }
 
