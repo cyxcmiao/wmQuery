@@ -254,13 +254,15 @@ def get_top_orders(item_slug, rank=None):
 STATS_BASE_URL = "https://api.warframe.market/v1"
 
 
-def get_closed_daily_avg(item_slug, full_rank=None):
-    """查询物品近90天已成交订单的按日中间价（warframe.market v1 统计接口，median 字段）
+def get_closed_stats(item_slug, full_rank=None):
+    """查询物品成交统计（warframe.market v1 统计接口，一次请求解析三组数据）
 
     :param full_rank: 赋能类传满级等级，只统计 mod_rank == 满级 的成交记录；
                       MOD 和其他物品传 None——成交记录带 mod_rank 的（MOD类）只统计0级，
                       不带 mod_rank 的（普通物品）不过滤等级
-    :return: {UTC日期字符串: 当日成交中间价}
+    :return: (按日中间价 {UTC日期: 当日中间价},
+              按日成交量 {UTC日期: 当日成交笔数},
+              近48小时总成交量)
     """
 
     url = f"{STATS_BASE_URL}/items/{item_slug}/statistics"
@@ -269,61 +271,88 @@ def get_closed_daily_avg(item_slug, full_rank=None):
 
     response.raise_for_status()
 
-    closed = response.json()["payload"]["statistics_closed"].get("90days", [])
+    closed = response.json()["payload"]["statistics_closed"]
+    daily = closed.get("90days", [])
+    hourly = closed.get("48hours", [])
 
-    # MOD 类物品的成交记录带 mod_rank：只统计 0 级
-    has_rank_field = any("mod_rank" in entry for entry in closed)
+    def filter_rank(entries):
+        """按等级过滤成交记录：赋能只看满级，MOD 只看0级，普通物品全保留"""
 
-    by_date = {}
+        has_rank_field = any("mod_rank" in entry for entry in entries)
 
-    for entry in closed:
-        if full_rank is not None:
-            # 赋能的成交记录按 mod_rank 拆条，只看满级
-            if entry.get("mod_rank") != full_rank:
+        result = []
+
+        for entry in entries:
+            if full_rank is not None:
+                # 赋能的成交记录按 mod_rank 拆条，只看满级
+                if entry.get("mod_rank") != full_rank:
+                    continue
+            elif has_rank_field and entry.get("mod_rank", 0) != 0:
                 continue
-        elif has_rank_field and entry.get("mod_rank", 0) != 0:
-            continue
 
-        median = entry.get("median")
+            result.append(entry)
 
-        if median is None:
-            continue
+        return result
 
+    medians = {}
+    volumes = {}
+
+    for entry in filter_rank(daily):
         day = entry["datetime"][:10]
-        by_date.setdefault(day, []).append(median)
+
+        if entry.get("median") is not None:
+            medians.setdefault(day, []).append(entry["median"])
+
+        vol = entry.get("volume")
+
+        if isinstance(vol, (int, float)) and not isinstance(vol, bool):
+            volumes[day] = volumes.get(day, 0) + vol
 
     # MOD 的成交记录按 mod_rank 拆成多条，合并为当日中间价（简单平均）
-    return {day: sum(vals) / len(vals) for day, vals in by_date.items()}
+    medians = {day: sum(vals) / len(vals) for day, vals in medians.items()}
+
+    vol48 = sum(
+        entry["volume"] for entry in filter_rank(hourly)
+        if isinstance(entry.get("volume"), (int, float)) and not isinstance(entry["volume"], bool)
+    )
+
+    return medians, volumes, vol48
 
 
-def get_recent_closed_avg(item_slug, need_count=None, max_rank=None):
-    """取昨天/前天/大前天（UTC日期）的成交中间价
+def get_recent_closed_stat(item_slug, need_count=None, max_rank=None):
+    """取昨天/前天/大前天（UTC日期）的成交中间价、当日成交量与近48小时总成交量
 
     :param need_count: 赋能类折算为单个价格时需要的个数，其他物品为 None
     :param max_rank: 赋能类的满级等级；MOD 只统计0级成交，普通物品不过滤
-    :return: [a, b, c]，某天没有成交时对应位置为 None；统计查询失败也返回 [None, None, None]，
+    :return: (prices, vols, vol48)
+             prices: [a, b, c] 某天没有成交时对应位置为 None
+             vols: [a, b, c] 与 prices 同序的当日成交量，无成交的日子为 0
+             vol48: 近48小时总成交量
+             统计查询失败时三者分别为 [None, None, None]、[None, None, None]、None，
              不影响挂单价格的展示
     """
 
     try:
-        by_date = get_closed_daily_avg(item_slug, full_rank=max_rank)
+        medians, volumes, vol48 = get_closed_stats(item_slug, full_rank=max_rank)
     except (requests.RequestException, KeyError, TypeError, ValueError):
-        return [None, None, None]
+        return [None, None, None], [None, None, None], None
 
     now = datetime.now(timezone.utc)
 
-    result = []
+    prices, vols = [], []
 
     for i in (1, 2, 3):
         day = (now - timedelta(days=i)).strftime("%Y-%m-%d")
-        avg = by_date.get(day)
+        avg = medians.get(day)
+        vol = volumes.get(day)
 
         if avg is not None and need_count:
             avg /= need_count
 
-        result.append(round(avg, 2) if avg is not None else None)
+        prices.append(round(avg, 2) if avg is not None else None)
+        vols.append(int(vol) if vol is not None else 0)
 
-    return result
+    return prices, vols, int(vol48)
 
 
 def get_pricing_parallel(item_slug, rank_groups, need_count, full_rank):
@@ -334,7 +363,8 @@ def get_pricing_parallel(item_slug, rank_groups, need_count, full_rank):
     :param rank_groups: 挂单请求的等级列表；赋能只看满级，MOD 为 [0, 满级]，普通物品为 [None]
     :param need_count: 赋能折算为单个价格的个数
     :param full_rank: 赋能满级等级（统计只看满级成交）；MOD/普通物品传 None
-    :return: (游戏内卖单列表（价格升序）, 三天成交中间价列表)
+    :return: (游戏内卖单列表（价格升序）,
+              (三天成交中间价列表, 三日成交量列表, 近48小时总成交量))
     """
 
     results, errors = {}, {}
@@ -355,7 +385,7 @@ def get_pricing_parallel(item_slug, rank_groups, need_count, full_rank):
 
     threads.append(threading.Thread(
         target=work,
-        args=(("closed",), lambda: get_recent_closed_avg(item_slug, need_count, full_rank)),
+        args=(("closed",), lambda: get_recent_closed_stat(item_slug, need_count, full_rank)),
     ))
 
     for t in threads:
@@ -945,6 +975,29 @@ def api_scene_save(scene_id):
             else:
                 closed = None
 
+            # 成交量 {days: 三日成交量, total48: 近48小时总量}；旧数据没有该字段
+            vols = row.get("vols")
+
+            if isinstance(vols, dict):
+                days = vols.get("days")
+
+                if isinstance(days, list):
+                    days = [
+                        v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+                        for v in days[:3]
+                    ]
+                else:
+                    days = None
+
+                total48 = vols.get("total48")
+
+                if not (isinstance(total48, (int, float)) and not isinstance(total48, bool)):
+                    total48 = None
+
+                vols = {"days": days, "total48": total48} if days else None
+            else:
+                vols = None
+
             clean.append({
                 "name": str(row.get("name", "")).strip()[:100],
                 "rate": str(row.get("rate", "")).strip()[:20],
@@ -955,6 +1008,7 @@ def api_scene_save(scene_id):
                 # 备注为用户自定义文本，与物品名同长度限制
                 "note": str(row.get("note", "")).strip()[:100],
                 "closed": closed,
+                "vols": vols,
             })
 
         data["elements"] = clean
@@ -1075,8 +1129,8 @@ def api_query():
         rank_groups = [0, max_rank]
 
     try:
-        filtered, closed = get_pricing_parallel(item["slug"], rank_groups, need_count,
-                                                max_rank if is_arcane else None)
+        filtered, (closed, closed_vols, vol48) = get_pricing_parallel(
+            item["slug"], rank_groups, need_count, max_rank if is_arcane else None)
     except requests.RequestException as e:
         # 网络异常（含自动重试后仍失败）：返回明确错误，而不是 500 崩掉
         # 原因打到后台窗口，方便排查 VPN/代理问题
@@ -1125,6 +1179,9 @@ def api_query():
         "wm_avg": wm_avg,
         "top3": [to_unit(p) for p in top3],
         "closed": closed,
+        # 近三日成交量 [昨天,前天,大前天]（无成交为0）与近48小时总成交量
+        "closed_vols": closed_vols,
+        "vol48": vol48,
         "history": history,
     })
 
@@ -1163,8 +1220,8 @@ def api_price():
         rank_groups = [0, max_rank]
 
     try:
-        filtered, closed = get_pricing_parallel(item["slug"], rank_groups, need_count,
-                                                max_rank if is_arcane else None)
+        filtered, (closed, closed_vols, vol48) = get_pricing_parallel(
+            item["slug"], rank_groups, need_count, max_rank if is_arcane else None)
     except requests.RequestException as e:
         # 网络异常（含自动重试后仍失败）：返回明确错误，而不是 500 崩掉
         # 原因打到后台窗口，方便排查 VPN/代理问题
@@ -1182,6 +1239,8 @@ def api_price():
             "prices": [],
             "avg": None,
             "closed": closed,
+            "closed_vols": closed_vols,
+            "vol48": vol48,
         })
 
     # 赋能折算为单个价格：均价按原始价计算，展示价格逐个折算并至多保留两位小数
@@ -1196,6 +1255,8 @@ def api_price():
         "prices": [to_unit(p) for p in top3],
         "avg": round(avg / need_count, 2) if need_count else round(avg, 2),
         "closed": closed,
+        "closed_vols": closed_vols,
+        "vol48": vol48,
     })
 
 
