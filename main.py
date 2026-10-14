@@ -1007,6 +1007,8 @@ def api_scene_save(scene_id):
                 "wm": str(row.get("wm", "")).strip()[:120],
                 # 备注为用户自定义文本，与物品名同长度限制
                 "note": str(row.get("note", "")).strip()[:100],
+                # 行禁用标记：更新全部数据时前端跳过该行
+                "disabled": bool(row.get("disabled", False)),
                 "closed": closed,
                 "vols": vols,
             })

@@ -75,7 +75,7 @@ body.scene-dragging .scene-item { cursor: grabbing; }
 .panel { width: 100%; max-width: 640px; }
 /* 场景页表格列多（9列），切换到场景时由 JS 给 main 加 wide 类放宽容器；
    加 wiki 按钮后操作列加宽 38px，容器同步 1200->1240 补偿，其他列宽不变 */
-main.wide { max-width: 1240px; }
+main.wide { max-width: 1280px; }  /* 1240 -> 1280：为掉率列让出完整显示「5.26%」的宽度，其他列不变 */
 h1 {
   font-size: 26px; color: #1c2733; letter-spacing: 1px;
   border-left: 4px solid #2b87c0; padding-left: 14px;
@@ -160,9 +160,9 @@ td.rank-no { color: #8a97a5; }
   padding: 8px 8px; border-bottom: 1px solid #d3dde5;
   white-space: nowrap;
 }
-.scene-table th:last-child { width: 146px; }
-/* 名称列加宽：约为自适应时的2倍 */
-.scene-table th:first-child { width: 23%; }
+.scene-table th:last-child { width: 174px; }
+/* 名称列：维持现状宽度（实测231px） */
+.scene-table th:first-child { width: 18.5%; }
 /* 可排序表头（期望价格、白金/十万声望） */
 .scene-table th.sortable { cursor: pointer; user-select: none; }
 .scene-table th.sortable:hover { color: #1d6fa5; }
@@ -179,8 +179,8 @@ td.rank-no { color: #8a97a5; }
 .cell-input.input-error { background: #ffe1de; border-color: #e26d5a; color: #d64541; }
 .cell-input[data-field="final"] { color: #b07d1a; font-weight: 600; }
 .cell-input[readonly] { background: #f6f8fa; }
-/* wm查询价格列：默认宽度20%（约为其他列的两倍），数据较长时表格自适应加宽该列 */
-.scene-table th.col-wm { width: 20%; }
+/* wm查询价格列：维持现状宽度（实测211px），数据较长时表格自适应加宽该列 */
+.scene-table th.col-wm { width: 16.9%; }
 /* wm查询价格列：两行文本，第一行为近三天成交中间价统计（蓝色） */
 .wm-display {
   min-height: 34px; padding: 7px 6px; font-size: 12.5px; line-height: 1.4;
@@ -191,18 +191,33 @@ td.rank-no { color: #8a97a5; }
 .wm-display .closed, #price-stats .closed { color: #2b87c0; font-weight: 600; }
 /* 成交量（绿色）：三日均值(昨天/前天/大前天)-48小时总量，紧跟在统计价格后 */
 .wm-display .closed-vol, #price-stats .closed-vol { color: #2f9e44; font-weight: 600; }
-/* 声望列：宽度为其他自适应列的1.5倍（实测65px -> 约98px） */
-.scene-table th.col-standing { width: 11.2%; }
-/* 备注列：用户自定义文本，加宽方便输入（4K 实测约216px） */
-.scene-table th.col-note { width: 18%; }
+/* 声望列：维持现状宽度（实测117px），完整显示 6 位声望数字（如 100000） */
+.scene-table th.col-standing { width: 9.4%; }
+/* 掉率列：固定宽度，保证完整显示「5.26%」 */
+.scene-table th.col-rate { width: 76px; }
+/* 备注列：维持现状宽度（实测183px） */
+.scene-table th.col-note { width: 14.6%; }
+/* 自定义价格/期望价格/白金-十万声望列：维持现状宽度（实测81/70/100px） */
+.scene-table th.col-custom { width: 81px; }
+.scene-table th[data-sort="final"] { width: 70px; }
+.scene-table th[data-sort="ptm"] { width: 100px; }
 .wm-display.readonly { color: #8a97a5; background: #f6f8fa; }
 .wm-display.gold-border { border-color: #b07d1a; }
-/* 操作列：wiki + 单行更新 + 删除 三个按钮并排 */
+/* 操作列：wiki + 单行更新 + 禁用/启用 + 删除 四个按钮并排 */
 .row-actions { display: flex; gap: 4px; }
 .row-actions button { flex: 1; padding: 5px 4px; font-size: 12px; border: none; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 /* wiki 按钮固定紧凑宽度，不参与 flex 拉伸 */
 .row-actions .row-wiki { flex: 0 0 auto; padding: 5px 8px; color: #55606c; background: #eef2f6; }
 .row-actions .row-wiki:hover { background: #dfe6ee; }
+/* 禁用按钮：与 wiki 同款灰色；行已禁用时变蓝色提示可点回「启用」 */
+.row-disable { color: #55606c; background: #eef2f6; }
+.row-disable:hover { background: #dfe6ee; }
+tr.row-disabled .row-disable { color: #1d6fa5; background: #e3f0f9; }
+tr.row-disabled .row-disable:hover { background: #d0e7f5; }
+/* 禁用行：整行灰色底（含输入框/wm列），更新全部数据时跳过该行 */
+.scene-table tr.row-disabled > td { background: #e9ecef; }
+.scene-table tr.row-disabled .cell-input,
+.scene-table tr.row-disabled .wm-display { background: #f1f3f5; border-color: #d5dbe1; }
 .row-update { color: #1d6fa5; background: #e3f0f9; }
 .row-update:hover { background: #d0e7f5; }
 .row-update:disabled { color: #8a97a5; background: #f0f2f5; cursor: default; }
@@ -416,9 +431,9 @@ tbody tr.fav .fav-btn { color: #b07d1a; }
           <thead>
             <tr>
               <th>名称</th>
-              <th>掉率</th>
+              <th class="col-rate">掉率</th>
               <th class="col-standing">声望</th>
-              <th>自定义价格</th>
+              <th class="col-custom">自定义价格</th>
               <th class="col-wm">wm查询价格</th>
               <th class="sortable" data-sort="final">期望价格<span class="sort-arrow"></span></th>
               <th class="sortable" data-sort="ptm">白金/十万声望<span class="sort-arrow"></span></th>
@@ -795,8 +810,8 @@ function showDupToast(text) {
   dupToastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
 }
 
-function sceneRowHtml(name, rate, custom, standing, note = '') {
-  return `<tr>
+function sceneRowHtml(name, rate, custom, standing, note = '', disabled = false) {
+  return `<tr${disabled ? ' class="row-disabled"' : ''}>
     <td><input class="cell-input" data-field="name" value="${escapeHtml(name)}" autocomplete="off" spellcheck="false"></td>
     <td><input class="cell-input rate" data-field="rate" value="${escapeHtml(rate)}"></td>
     <td class="col-standing"><input class="cell-input num" data-field="standing" value="${escapeHtml(standing || '')}"></td>
@@ -805,7 +820,7 @@ function sceneRowHtml(name, rate, custom, standing, note = '') {
     <td><input class="cell-input num" data-field="final" readonly></td>
     <td class="col-ptm"><input class="cell-input num" data-field="ptm" readonly></td>
     <td><input class="cell-input" data-field="note" value="${escapeHtml(note)}" maxlength="100" spellcheck="false" placeholder="自定义备注"></td>
-    <td><div class="row-actions"><button type="button" class="row-wiki" title="打开灰机Wiki页面">wiki</button><button class="row-update" title="只查询本行的价格">单行更新</button><button class="row-del">删除</button></div></td>
+    <td><div class="row-actions"><button type="button" class="row-wiki" title="打开灰机Wiki页面">wiki</button><button class="row-update" title="只查询本行的价格">单行更新</button><button type="button" class="row-disable" title="禁用后整行置灰，更新全部数据时跳过">${disabled ? '启用' : '禁用'}</button><button class="row-del">删除</button></div></td>
   </tr>`;
 }
 
@@ -915,7 +930,7 @@ function renderSceneRows() {
     ? sceneData.elements : [{}];
 
   sceneRows.innerHTML = elements.map(el =>
-    sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.standing, el.note || '')).join('');
+    sceneRowHtml(el.name || '', el.rate || '', el.custom || '', el.standing, el.note || '', el.disabled === true)).join('');
 
   // 重置默认顺序号并记录每行名称的初始值
   origSeq = 0;
@@ -969,6 +984,8 @@ function collectRows() {
       wm: wmEl.innerText.trim(),
       // 用户自定义备注
       note: tr.querySelector('[data-field="note"]').value.trim(),
+      // 行禁用标记：更新全部数据时跳过该行
+      disabled: tr.classList.contains('row-disabled'),
       // 三天成交中间价 [昨天,前天,大前天]，缺失为 null；旧数据或查询失败时为 null
       closed: closed,
       vols: vols,
@@ -1212,6 +1229,18 @@ sceneRows.addEventListener('click', async e => {
     e.target.closest('tr').remove();
     hideCellSuggest();
     updateProfit();
+    scheduleSceneSave();
+    return;
+  }
+
+  // 禁用/启用切换：整行置灰，更新全部数据时跳过该行（不计数）
+  const disableBtn = e.target.closest('.row-disable');
+
+  if (disableBtn) {
+    const tr = disableBtn.closest('tr');
+    const disabled = tr.classList.toggle('row-disabled');
+
+    disableBtn.textContent = disabled ? '启用' : '禁用';
     scheduleSceneSave();
     return;
   }
@@ -1617,11 +1646,11 @@ async function runUpdateData() {
   updating = true;
   updateBtn.disabled = true;
 
-  // 统计需要查询的行数，用于显示进度（如 3/13）
+  // 统计需要查询的行数，用于显示进度（如 3/13）；已禁用的行直接跳过
   const todoRows = [...sceneRows.querySelectorAll('tr')].filter(tr => {
     const name = tr.querySelector('[data-field="name"]').value.trim();
     const custom = tr.querySelector('[data-field="custom"]').value.trim();
-    return name !== '' && custom === '';
+    return name !== '' && custom === '' && !tr.classList.contains('row-disabled');
   });
   const total = todoRows.length;
   let done = 0;
@@ -1630,6 +1659,9 @@ async function runUpdateData() {
   setProgress();
 
   for (const tr of sceneRows.querySelectorAll('tr')) {
+    // 禁用行：整行跳过，不查询也不计数
+    if (tr.classList.contains('row-disabled')) continue;
+
     const queried = await queryRowPrice(tr);
 
     if (queried) {
