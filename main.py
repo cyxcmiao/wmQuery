@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from html import unescape as _html_unescape
 
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -31,6 +31,8 @@ else:
     RESOURCE_DIR = BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 HEADERS = {
+    # 浏览器 UA：2026-11-04 起 Cloudflare 拦截 python-requests 默认 UA（403 "Just a moment..."）
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "application/json",
     "Language": "zh-hans",
     "Platform": "pc",
@@ -1285,10 +1287,71 @@ def open_browser(url):
         pass  # 打不开浏览器时用户可手动访问打印出的地址
 
 
+# ---------- 浏览器关闭即退出（无终端 exe 启动时启用） ----------
+# 原理：页面挂一条 /api/poll 长连接（EventSource）；服务端发现所有长连接
+# 都断开，且数秒内没有新页面连上来（排除刷新），就退出整个程序。
+# 无终端 exe 双击后全程无窗口无提示框，关掉查询页面程序即结束。
+# 注意：页面切后台/系统睡眠都不影响（长连接是纯网络连接，不依赖页面定时器，
+# 不受浏览器后台标签页节流影响）。普通方式（python main.py 带控制台）不启用，
+# 仍按 Ctrl+C 或关窗口退出。
+
+BROWSER_EXIT = os.environ.get("WMQUERY_BROWSER_EXIT") == "1"  # 由启动器 wmQuery.exe 设置
+
+_poll_lock = threading.Lock()
+_poll_active = 0      # 当前挂着的页面长连接数（多开页面/多标签都算）
+_poll_ever = False    # 是否有过页面连上来（浏览器没打开时不判退出）
+_poll_gone_at = 0.0   # 最后一条长连接断开的时刻
+
+
+@app.route("/api/poll")
+def api_poll():
+    """页面存活探测：SSE 长连接，2 秒一跳；断开时 finally 感知"""
+
+    global _poll_active, _poll_ever, _poll_gone_at
+
+    with _poll_lock:
+        _poll_active += 1
+        _poll_ever = True
+        _poll_gone_at = 0.0
+
+    def stream():
+        global _poll_active, _poll_gone_at
+        try:
+            while True:
+                yield ": ping\n\n"   # SSE 注释行，只为保活，不产生事件
+                time.sleep(2)
+        finally:
+            # 客户端断开（关页面/关浏览器）或连接出错时都会走到这里
+            with _poll_lock:
+                _poll_active -= 1
+                _poll_gone_at = time.time()
+
+    resp = Response(stream(), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+def _browser_exit_watchdog():
+    """所有查询页面断开超过 5 秒（页面刷新会自动重连，给足时间）就退出"""
+
+    while True:
+        time.sleep(1)
+        with _poll_lock:
+            all_gone = _poll_ever and _poll_active == 0 and _poll_gone_at > 0
+            idle = time.time() - _poll_gone_at
+        if all_gone and idle > 5:
+            # 数据文件都是请求内同步写完的，直接退出安全
+            os._exit(0)
+
+
 def main():
     global ITEMS, NAME_LIST
 
     ensure_cache_dir()
+
+    # 无终端模式：查询页面全部关闭后自动退出
+    if BROWSER_EXIT:
+        threading.Thread(target=_browser_exit_watchdog, daemon=True).start()
 
     print("正在读取物品列表缓存...")
 
